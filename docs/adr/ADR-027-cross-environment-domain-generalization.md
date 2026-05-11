@@ -90,6 +90,23 @@ Five concurrent lines of research have converged on the domain generalization pr
 - ◻ **Iteration 3+**: pool & ingest heterogeneous CSI (own recordings + MM-Fi + Wi-Pose + multi-band virtual sub-carriers); real pre-train run (GPU — `scripts/gcloud-train.sh` / the cognitum project); per-sample masking + self-attention transformer blocks (lift the v0 limits); fine-tune the §2.x heads on top of the pre-trained encoder; cross-domain eval (§4.6 protocol); ship the encoder as an RVF segment (§4.7).
 - ⏸ **Out of scope here**: the per-room SFDA adaptation (stage 3) — its own ADR.
 
+#### Iteration 3 plan — heterogeneous-CSI ingest, GPU pre-train, fine-tune handoff
+
+The remaining prototype work (the parts that can't run on the dev box):
+
+1. **Heterogeneous-CSI ingest.** A `csi_mae`-adjacent loader that pools every reachable CSI source into a uniform `[T, tx, rx, sub]` window stream, normalising sub-carrier count to 56 (via `wifi-densepose-train::subcarrier::interpolate_subcarriers`) and amplitude scale per-frame:
+   - own captures: `data/recordings/*.csi.jsonl`, overnight recordings;
+   - `MmFiDataset` (ADR-015, NeurIPS-2023 MM-Fi, 114 sub-carriers → interpolate);
+   - Wi-Pose (ADR-015);
+   - multi-band virtual sub-carriers from `ruvsense/multiband.rs` (3 channels × 56 → 168) — treated as extra tokens, not extra streams;
+   - public CSI corpora as available.
+   Implemented as a `CsiDataset` impl (e.g. `PooledCsiDataset`) that round-robins / weights sources; `pretrain-mae` gains a `--datasets <spec>` flag selecting it instead of `SyntheticCsiDataset`. *Thesis (arXiv:2511.18792): breadth of this pool — devices, bands, rooms — is what buys cross-domain generalisation; the model stays small.*
+2. **GPU pre-train run.** `scripts/pretrain-mae-gcloud.sh` (added this iteration — a thin mirror of `scripts/gcloud-train.sh`): provisions a GCloud VM in `cognitum-20260110`, builds `wifi-densepose-train` with `--features tch-backend,cuda`, runs `pretrain-mae`, downloads the `.ot` variable store, tears the VM down. Currently drives `SyntheticCsiDataset` (the smoke path); the `--data-dir`/`--datasets` plumbing for the real corpus is the one TODO in that script. *Not run as part of this prototype.*
+3. **Lift the v0 model limits.** Per-sample masking (gather/scatter so each window in a batch can have its own mask), self-attention transformer blocks in the encoder/decoder (replacing the residual MLPs and the flatten-to-latent bottleneck — this also removes the fixed-`n_tokens` constraint), a circular phase-reconstruction loss.
+4. **Fine-tune handoff.** Load the pre-trained `CsiMae` encoder weights into the `model::WiFiDensePoseModel` front-end (the `ModalityTranslator` slot), freeze for a warm-up, then unfreeze; train the 17-keypoint / DensePose-UV heads, the AETHER contrastive embedding (ADR-024), and the §2.1–§2.6 domain-adversarial / geometry-conditioned layers *as regularisers on top of the pre-trained representation*. A `train` sub-command flag (`--init-encoder <mae.ot>`) wires this.
+5. **Cross-domain eval.** Run §4.6's protocol (leave-one-room-out / leave-one-device-out) on the fine-tuned model vs. the from-scratch baseline; the win condition is the +2.2 %…+15.7 % cross-domain band that 2511.18792 reports for MAE pre-training.
+6. **Ship the encoder** as an RVF segment (§4.7) so deployments load a pre-trained backbone and only carry the small task head + per-room adapter (stage 3 / the SFDA ADR).
+
 The remainder of this ADR (§2.1 onward) describes the **fine-tune-stage architecture** — read it as "the head and regularisers that sit on top of the §2.0 pre-trained encoder", not as a from-scratch design.
 
 ### 2.1 Architecture: Environment-Disentangled Dual-Path Transformer

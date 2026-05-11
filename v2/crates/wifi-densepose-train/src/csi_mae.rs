@@ -32,10 +32,15 @@
 //!
 //! # Status
 //!
-//! Prototype, iteration 1: masking pipeline + config + tests + ADR §2.0. The
-//! `model` submodule is a v0 skeleton (MLP encoder/decoder, batch-level masking)
-//! — transformer blocks, per-sample masking, information-guided masking, and a
-//! `pretrain-mae` binary land in subsequent iterations.
+//! Prototype. **iter 1**: masking pipeline + config + tests + ADR §2.0.
+//! **iter 2a**: information-guided masking ([`MaskStrategy::InfoGuided`]).
+//! **iter 2b**: the [`model`] submodule — `CsiMae` (MLP-based v0 dual-stream
+//! encoder/decoder, batch-shared masking), `reconstruction_loss`, `MaeBatch`,
+//! `pretrain_step`, plus the `pretrain-mae` binary (`bin/pretrain_mae.rs`,
+//! `--features tch-backend`). **iter 3+** (see ADR-027 §2.0 "Iteration 3 plan"
+//! and `scripts/pretrain-mae-gcloud.sh`): heterogeneous-CSI ingest, the real
+//! GPU pre-train run, per-sample masking + self-attention transformer blocks
+//! (lifting the v0 limits), and the fine-tune handoff into the §2.x heads.
 //!
 //! [CIG-MAE]: https://arxiv.org/html/2512.04723v1
 
