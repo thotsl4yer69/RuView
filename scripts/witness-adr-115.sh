@@ -122,11 +122,36 @@ ADR_FILES=(
   v2/crates/wifi-densepose-sensing-server/src/semantic/bed_exit.rs
   v2/crates/wifi-densepose-sensing-server/src/semantic/no_movement.rs
   v2/crates/wifi-densepose-sensing-server/src/semantic/multi_room.rs
-  v2/crates/wifi-densepose-sensing-server/src/Cargo.toml
+  v2/crates/wifi-densepose-sensing-server/Cargo.toml
   v2/crates/wifi-densepose-sensing-server/tests/mqtt_integration.rs
   v2/crates/wifi-densepose-sensing-server/benches/mqtt_throughput.rs
   v2/crates/wifi-densepose-sensing-server/examples/mqtt_publisher.rs
   .github/workflows/mqtt-integration.yml
+  # Matter scaffolding (P7 + P8a)
+  v2/crates/wifi-densepose-sensing-server/src/matter/mod.rs
+  v2/crates/wifi-densepose-sensing-server/src/matter/clusters.rs
+  v2/crates/wifi-densepose-sensing-server/src/matter/bridge.rs
+  v2/crates/wifi-densepose-sensing-server/src/matter/commissioning.rs
+  # Release + ops artifacts
+  docs/releases/v0.7.0-mqtt-matter.md
+  docs/integrations/benchmarks.md
+  scripts/validate-esp32-mqtt.sh
+  scripts/validate-ha-blueprints.py
+  # HA Blueprints (8)
+  examples/ha-blueprints/README.md
+  examples/ha-blueprints/01-notify-on-possible-distress.yaml
+  examples/ha-blueprints/02-dim-hallway-when-sleeping.yaml
+  examples/ha-blueprints/03-wake-routine-on-bed-exit.yaml
+  examples/ha-blueprints/04-alert-elderly-inactivity-anomaly.yaml
+  examples/ha-blueprints/05-meeting-lights-presence-mode.yaml
+  examples/ha-blueprints/06-bathroom-fan-while-occupied.yaml
+  examples/ha-blueprints/07-fall-risk-escalation.yaml
+  examples/ha-blueprints/08-auto-arm-security-when-not-active.yaml
+  # Lovelace dashboards (3)
+  examples/lovelace/README.md
+  examples/lovelace/01-single-room-overview.yaml
+  examples/lovelace/02-multi-node-grid.yaml
+  examples/lovelace/03-healthcare-aal-view.yaml
 )
 {
   echo "# ADR-115 source manifest"
