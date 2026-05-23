@@ -37,12 +37,14 @@
 pub mod config;
 pub mod discovery;
 pub mod privacy;
+// State encoders + rate limiter compile without rumqttc, so they're
+// available for testing under `--no-default-features`. Only the
+// publisher itself (which holds the `rumqttc::AsyncClient`) needs the
+// `mqtt` feature.
+pub mod state;
 
 #[cfg(feature = "mqtt")]
 pub mod publisher;
-
-#[cfg(feature = "mqtt")]
-pub mod state;
 
 pub use config::MqttConfig;
 pub use discovery::{

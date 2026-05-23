@@ -121,7 +121,7 @@ impl AvailabilityPayload {
 
 /// All entity kinds RuView publishes via MQTT. Used by [`DiscoveryBuilder`]
 /// to generate matching `config` and `state` topic strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityKind {
     Presence,
     PersonCount,
