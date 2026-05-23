@@ -323,9 +323,15 @@ async fn state_messages_published_on_snapshot_broadcast() {
         );
     }
 
+    // Filter for THIS test's presence state messages. The topic format
+    // is `homeassistant/binary_sensor/wifi_densepose_<node>/presence/state`
+    // — `wifi_densepose_inttest3` is one path segment with an underscore
+    // separator, NOT slash-separated. The previous version looked for
+    // `/inttest3/presence/state` (with leading slash) which is the bug
+    // that took 5 commits + a diagnostic dump to find.
     let presence_states: Vec<String> = msgs
         .iter()
-        .filter(|(t, _, _)| t.contains("/inttest3/presence/state"))
+        .filter(|(t, _, _)| t.contains("wifi_densepose_inttest3/presence/state"))
         .map(|(_, p, _)| String::from_utf8_lossy(p).into_owned())
         .collect();
 
