@@ -4370,7 +4370,10 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     let adaptive_model_clone = s.adaptive_model.clone();
 
                     let ns = s.node_states.entry(node_id).or_insert_with(NodeState::new);
-                    ns.last_frame_time = Some(std::time::Instant::now());
+                    // ADR-110 iter 19 — feed the per-node fps EMA from real
+                    // CSI arrivals. The helper sets `last_frame_time` as a
+                    // side effect, so the previous bare assignment is gone.
+                    ns.observe_csi_frame_arrival(std::time::Instant::now());
 
                     // ADR-084 Pass 3: cluster-Pi novelty sensor.
                     // Score this frame's feature vector against the per-node
