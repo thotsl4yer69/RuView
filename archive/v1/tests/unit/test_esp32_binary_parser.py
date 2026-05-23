@@ -19,6 +19,8 @@ from hardware.csi_extractor import (
     CSIExtractor,
     CSIParseError,
     CSIExtractionError,
+    SyncPacket,
+    SyncPacketParser,
 )
 
 # ADR-018 constants
@@ -257,3 +259,108 @@ class TestESP32BinaryParser:
             await extractor.disconnect()
 
         asyncio.run(run_test())
+
+
+# ============================================================================
+# ADR-110 §A0.12 — SyncPacket / SyncPacketParser tests (firmware v0.6.9+)
+# ============================================================================
+
+SYNC_MAGIC = 0xC511A110
+SYNC_SIZE = 32
+SYNC_FMT = '<IBBBBQQI4x'
+
+
+def build_sync_packet(
+    node_id: int = 9,
+    proto_ver: int = 1,
+    is_leader: bool = False,
+    is_valid: bool = True,
+    smoothed_used: bool = True,
+    local_us: int = 28798450,
+    epoch_us: int = 27634885,
+    sequence: int = 20,
+) -> bytes:
+    flags = 0
+    if is_leader:     flags |= 0x01
+    if is_valid:      flags |= 0x02
+    if smoothed_used: flags |= 0x04
+    return struct.pack(
+        SYNC_FMT,
+        SYNC_MAGIC,
+        node_id, proto_ver, flags, 0,
+        local_us, epoch_us, sequence,
+    )
+
+
+class TestSyncPacketParser:
+    """ADR-110 §A0.12: 32-byte UDP sync packet (magic 0xC511A110)."""
+
+    def test_follower_typical_packet_roundtrips(self):
+        """Match the COM9-witnessed sync-pkt #1 byte-for-byte."""
+        raw = build_sync_packet(
+            node_id=9, is_leader=False, is_valid=True, smoothed_used=True,
+            local_us=28798450, epoch_us=27634885, sequence=20,
+        )
+        assert len(raw) == SYNC_SIZE
+        pkt = SyncPacketParser.parse(raw)
+        assert isinstance(pkt, SyncPacket)
+        assert pkt.node_id == 9
+        assert pkt.proto_ver == 1
+        assert pkt.is_leader is False
+        assert pkt.is_valid is True
+        assert pkt.smoothed_used is True
+        assert pkt.local_us == 28798450
+        assert pkt.epoch_us == 27634885
+        assert pkt.sequence == 20
+        # The 1.16-second boot delta from §A0.10 should be recoverable
+        assert pkt.local_us - pkt.epoch_us == 1163565
+
+    def test_leader_packet_has_local_close_to_epoch(self):
+        """COM12 (leader) had flags=0x03 and epoch ≈ local."""
+        raw = build_sync_packet(
+            node_id=12, is_leader=True, is_valid=True, smoothed_used=False,
+            local_us=28864932, epoch_us=28864939, sequence=20,
+        )
+        pkt = SyncPacketParser.parse(raw)
+        assert pkt.node_id == 12
+        assert pkt.is_leader is True
+        assert pkt.is_valid is True
+        assert pkt.smoothed_used is False
+        assert pkt.flags_raw == 0x03
+        assert pkt.local_us - pkt.epoch_us == -7  # leader has zero offset
+
+    def test_magic_mismatch_raises(self):
+        """A non-sync datagram must not silently decode."""
+        raw = bytearray(build_sync_packet())
+        raw[0] = 0x01  # corrupt magic low byte
+        with pytest.raises(CSIParseError, match="magic mismatch"):
+            SyncPacketParser.parse(bytes(raw))
+
+    def test_short_packet_raises(self):
+        """Below 32 bytes must error early, not silently truncate."""
+        raw = build_sync_packet()[:16]
+        with pytest.raises(CSIParseError, match="too short"):
+            SyncPacketParser.parse(raw)
+
+    def test_all_flag_combinations(self):
+        """Each flag bit decodes independently."""
+        for is_leader in (False, True):
+            for is_valid in (False, True):
+                for smoothed_used in (False, True):
+                    raw = build_sync_packet(
+                        is_leader=is_leader,
+                        is_valid=is_valid,
+                        smoothed_used=smoothed_used,
+                    )
+                    pkt = SyncPacketParser.parse(raw)
+                    assert pkt.is_leader == is_leader
+                    assert pkt.is_valid == is_valid
+                    assert pkt.smoothed_used == smoothed_used
+
+    def test_dispatch_distinguishes_csi_from_sync(self):
+        """A host can pick CSI vs sync by leading magic."""
+        csi_magic = struct.unpack_from('<I', build_binary_frame(), 0)[0]
+        sync_magic = struct.unpack_from('<I', build_sync_packet(), 0)[0]
+        assert csi_magic == ESP32BinaryParser.MAGIC
+        assert sync_magic == SyncPacketParser.MAGIC
+        assert csi_magic != sync_magic
