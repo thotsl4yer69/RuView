@@ -9,9 +9,14 @@
 
 use crate::objective::{SafeEntrainmentObjective, ScoreInputs};
 use crate::optimizer::{BayesianOptimizer, CalibrationPlan, Recommendation};
+use crate::participant::{
+    lock_class_for, stop_tag, DoseLimits, DoseViolation, LockClass, ParticipantSafetyState,
+};
 use crate::program::NeuroProgram;
-use crate::response::{PersonResponseVector, RuViewState, SessionObservation, SleepState, SubjectiveReport};
-use crate::ruvector::{AnonymizedProfile, DriftDetector, DriftStatus, ProfileStore};
+use crate::response::{
+    PersonResponseVector, RuViewState, SessionObservation, SleepState, SubjectiveReport,
+};
+use crate::ruvector::{DriftDetector, DriftStatus};
 use crate::safety::{
     ExclusionCondition, ExclusionScreen, SafetyMonitor, SafetyTick, ScreenOutcome, StopReason,
 };
@@ -51,19 +56,39 @@ pub enum GovernanceError {
     NoConsent,
     #[error("requested stimulus is outside the approved safety envelope")]
     OutsideEnvelope,
+    /// Finding 2: the participant is latched-locked after an adverse-event /
+    /// distress / seizure-like stop (ADR-250 §8 terminate-and-lock). Only
+    /// [`RufloGovernor::unlock_with_acknowledgment`] clears it.
+    #[error(
+        "participant is locked ({class:?} — {reason}); operator acknowledgment required to resume"
+    )]
+    ParticipantLocked { class: LockClass, reason: String },
+    /// Finding 4: the rolling-24h daily-dose cap is exhausted.
+    #[error("daily dose limit reached: {sittings} sittings in 24h exceeds the cap of {max}")]
+    DailyDoseLimit { sittings: usize, max: usize },
+    /// Finding 4: the minimum inter-session cooldown has not yet elapsed.
+    #[error("inter-session cooldown active: {elapsed_minutes:.1} min elapsed, {required_minutes:.1} min required")]
+    CooldownActive {
+        elapsed_minutes: f64,
+        required_minutes: f64,
+    },
+    /// [`RufloGovernor::unlock_with_acknowledgment`] was called but the
+    /// participant was not locked.
+    #[error("participant is not locked")]
+    NotLocked,
 }
 
-/// Clinician-facing export summary (ADR-250 §11 responsibility 9, §17).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClinicianReport {
-    pub person_id: String,
-    pub n_sessions: usize,
-    pub n_safety_stops: usize,
-    pub best_frequency_hz: Option<f64>,
-    pub mean_entrainment: f64,
-    pub adverse_event_recorded: bool,
-    pub claim: &'static str,
-}
+// Clinician export (`ClinicianReport` + `clinician_report`) lives in the child
+// module `report` (split out to keep this file under 500 lines); it is a
+// descendant module, so it retains access to the governor's private fields.
+#[path = "ruflo_report.rs"]
+mod report;
+pub use report::ClinicianReport;
+
+// RuVector cohort bridge (`seed_from_cohort`, `export_anonymized_profile`),
+// split out to keep this file under 500 lines; descendant module → private access.
+#[path = "ruflo_ruvector.rs"]
+mod ruvector_bridge;
 
 /// The governed adaptive-gamma protocol runner for one participant.
 pub struct RufloGovernor {
@@ -81,6 +106,11 @@ pub struct RufloGovernor {
     // ADR-250 §10 item 4: per-person drift detection over the response vector.
     drift: DriftDetector,
     drift_status: DriftStatus,
+    // Finding 2 & 4: persisted cross-session safety state (latched lock + the
+    // dose/cooldown ledger). Serialize it into the session store so a NEW
+    // governor for the same participant honors the lock and the dose history.
+    safety_state: ParticipantSafetyState,
+    dose_limits: DoseLimits,
     // Platform extension: the program this participant is enrolled under
     // (envelope/prior/objective/state-gating/claim). `None` for the bare
     // `enroll` path (Alzheimer's defaults), which keeps the pinned witness.
@@ -120,9 +150,17 @@ impl RufloGovernor {
             next_index: 0,
             drift: DriftDetector::default(),
             drift_status: DriftStatus::Warmup,
+            safety_state: ParticipantSafetyState::default(),
+            dose_limits: DoseLimits::conservative(),
             program: None,
         })
     }
+
+    /// Minimum number of distinct cohort profiles required before
+    /// [`seed_from_cohort`](Self::seed_from_cohort) will consume their priors — a
+    /// privacy k-floor so a single (or pair of) donor profile(s) cannot shape a
+    /// new participant's optimizer.
+    pub const MIN_COHORT_PROFILES: usize = 3;
 
     /// Enroll a participant under a [`NeuroProgram`] (the platform path): the
     /// program supplies the safety envelope, starting prior, and objective
@@ -165,49 +203,66 @@ impl RufloGovernor {
             .unwrap_or(true)
     }
 
-    /// Seed the optimizer from a cohort of anonymized similar responders
-    /// (ADR-250 §10 item 3): the `k` nearest profiles' frequency responses
-    /// enter as **down-weighted pseudo-observations**, shaping where the
-    /// optimizer looks first without ever counting as this person's measured
-    /// data ([`BayesianOptimizer::observe_prior`]). Returns how many priors
-    /// were installed.
-    pub fn seed_from_cohort(&mut self, store: &ProfileStore, k: usize) -> usize {
-        let query = self.response.as_array();
-        let priors =
-            store.warm_start_prior(&query, k, self.optimizer.noise_var);
-        for p in &priors {
-            // Only frequencies inside this participant's envelope are usable.
-            if p.frequency_hz >= self.envelope.min_hz && p.frequency_hz <= self.envelope.max_hz {
-                self.optimizer
-                    .observe_prior(p.frequency_hz, p.expected_score, p.noise_var);
-            }
-        }
-        priors.len()
-    }
-
-    /// Export this participant as an anonymized profile for the cohort store
-    /// (ADR-250 §10 items 3/6). Carries the one-way hashed tag, the response
-    /// vector, and per-frequency scores from **safe sessions only** — never
-    /// the `person_id`, never raw sensor data.
-    pub fn export_anonymized_profile(&self) -> AnonymizedProfile {
-        let frequency_scores: Vec<(f64, f64)> = self
-            .audit
-            .iter()
-            .filter(|r| r.outcome.safety_pass)
-            .map(|r| (r.stimulus.frequency_hz, r.outcome.entrainment_score))
-            .collect();
-        AnonymizedProfile {
-            profile_tag: AnonymizedProfile::tag_for(&self.person_id),
-            vector: self.response.as_array(),
-            frequency_scores,
-        }
-    }
+    // `seed_from_cohort` + `export_anonymized_profile` (the RuVector cohort
+    // bridge, ADR-250 §10) live in the child module `ruvector_bridge` to keep
+    // this file under 500 lines; it retains private-field access.
 
     /// Latest drift judgment (ADR-250 §10 item 4). `Drifted` recommends
     /// re-running the Phase-1 calibration sweep before trusting further
     /// optimization.
     pub fn drift_status(&self) -> DriftStatus {
         self.drift_status
+    }
+
+    /// The persisted per-participant safety state (latched lock + dose ledger,
+    /// Finding 2 & 4). Serialize it into the session store; reload it into a new
+    /// governor with [`with_safety_state`](Self::with_safety_state) and the lock
+    /// and dose history are honored across instances.
+    pub fn safety_state(&self) -> &ParticipantSafetyState {
+        &self.safety_state
+    }
+
+    /// This participant's safety envelope.
+    pub fn envelope(&self) -> &SafetyEnvelope {
+        &self.envelope
+    }
+
+    /// Whether the participant is currently latched-locked.
+    pub fn is_locked(&self) -> bool {
+        self.safety_state.is_locked()
+    }
+
+    /// Load a previously-persisted safety state onto a fresh governor (e.g. for a
+    /// returning participant). A locked state makes this governor refuse to run
+    /// sessions until [`unlock_with_acknowledgment`](Self::unlock_with_acknowledgment).
+    pub fn with_safety_state(mut self, state: ParticipantSafetyState) -> Self {
+        self.safety_state = state;
+        self
+    }
+
+    /// Override the dose/cooldown policy (Finding 4). Defaults to
+    /// [`DoseLimits::conservative`]; real deployments must keep a conservative
+    /// policy — the permissive variant exists only for time-compressed
+    /// simulation.
+    pub fn with_dose_limits(mut self, limits: DoseLimits) -> Self {
+        self.dose_limits = limits;
+        self
+    }
+
+    /// Lift a latched lock with an explicit operator acknowledgment, writing an
+    /// audit record into the persisted safety state (ADR-250 §8 / §11, Finding 2).
+    ///
+    /// # Errors
+    /// [`GovernanceError::NotLocked`] if the participant was not locked.
+    pub fn unlock_with_acknowledgment(
+        &mut self,
+        operator_note: &str,
+        timestamp_ms: u64,
+    ) -> Result<(), GovernanceError> {
+        match self.safety_state.unlock(operator_note, timestamp_ms) {
+            Some(_) => Ok(()),
+            None => Err(GovernanceError::NotLocked),
+        }
     }
 
     /// Switch trial mode (e.g., to `Sham` for a blinded arm).
@@ -242,7 +297,16 @@ impl RufloGovernor {
     ) -> Result<(), GovernanceError> {
         let mut plan = CalibrationPlan::new(&self.envelope);
         while let Some(stim) = plan.next_stimulus(&self.envelope, session_minutes) {
-            self.run_session(sim, latent, state, &stim, base_timestamp_ms)?;
+            // Finding 1: a safety stop is a control-flow event. `run_session`
+            // still returns the (witnessed) record on a stop, so we must inspect
+            // its safety outcome and TERMINATE the sweep — a stop in step N must
+            // not let steps N+1.. proceed. The partial calibration stays in the
+            // audit log, and any lock-warranting stop has already engaged the
+            // governor lock (ADR-250 §8 terminate-and-lock).
+            let record = self.run_session(sim, latent, state, &stim, base_timestamp_ms)?;
+            if !record.outcome.safety_pass {
+                break;
+            }
         }
         Ok(())
     }
@@ -267,14 +331,46 @@ impl RufloGovernor {
         if self.consent != Consent::Granted {
             return Err(GovernanceError::NoConsent);
         }
+        // Finding 2: a locked participant refuses every session (fail closed)
+        // until an explicit operator acknowledgment lifts the lock. This holds
+        // across governor instances because the lock lives in `safety_state`,
+        // which is serialized into the session store.
+        if let Some(lock) = self.safety_state.lock_record() {
+            return Err(GovernanceError::ParticipantLocked {
+                class: lock.class,
+                reason: lock.reason_tag.clone(),
+            });
+        }
         if !self.envelope.contains(stimulus) {
             return Err(GovernanceError::OutsideEnvelope);
+        }
+        // Finding 4: daily-dose cap + inter-sitting cooldown. Same-timestamp
+        // calibration sub-sessions are one sitting and pass freely; a new
+        // sitting must clear both the cooldown and the daily cap.
+        if let Err(v) = self
+            .safety_state
+            .check_admission(timestamp_ms, &self.dose_limits)
+        {
+            return Err(match v {
+                DoseViolation::DailyLimit { sittings, max } => {
+                    GovernanceError::DailyDoseLimit { sittings, max }
+                }
+                DoseViolation::Cooldown {
+                    elapsed_minutes,
+                    required_minutes,
+                } => GovernanceError::CooldownActive {
+                    elapsed_minutes,
+                    required_minutes,
+                },
+            });
         }
 
         let idx = self.next_index;
         self.next_index += 1;
+        // Commit this sitting to the dose ledger (calibration steps included).
+        self.safety_state.record_session(timestamp_ms);
 
-        // --- Observe (simulated) response. ---
+        // --- Observe (simulated) aggregate response (the scoring source). ---
         let mut resp = sim.simulate(latent, state, stimulus, idx);
         if self.mode == TrialMode::Sham {
             // Blinding: no entrainment is actually delivered.
@@ -282,22 +378,56 @@ impl RufloGovernor {
             resp.eeg.phase_locking_value *= 0.05;
         }
 
-        // --- Safety monitor over the (single-summary) tick. ---
+        // --- Finding 5: per-tick safety monitor over the WHOLE session. Every
+        // tick is evaluated and the monitor latches; a mid-session latch
+        // truncates the session at that tick. A clean session produces no
+        // events (byte-identical witness to the prior single-summary path,
+        // since for a clean run the only tick signal is the unchanged sensor
+        // confidence). This makes the <500 ms stop-latency contract apply to
+        // the integrated path, at least in simulation.
         let mut monitor = SafetyMonitor::new(self.confidence_floor);
+        let ticks = sim.session_ticks(latent, state, stimulus, idx);
+        let n_ticks = ticks.len().max(1);
         let mut safety_events = Vec::new();
-        let adverse = if resp.adverse_event {
-            Some(crate::safety::AdverseEvent::AbnormalDistress)
-        } else {
-            None
-        };
-        if let Some(stop) = monitor.evaluate(SafetyTick {
-            adverse,
-            sensor_confidence: resp.ruview.sensor_confidence,
-            stimulus_in_envelope: true,
-        }) {
-            safety_events.push(stop);
+        let mut stop_tick: Option<usize> = None;
+        for (i, t) in ticks.iter().enumerate() {
+            if let Some(stop) = monitor.evaluate(SafetyTick {
+                adverse: t.adverse,
+                sensor_confidence: t.sensor_confidence,
+                stimulus_in_envelope: true,
+            }) {
+                safety_events.push(stop);
+                stop_tick = Some(i);
+                break;
+            }
         }
         let safety_pass = !safety_events.iter().any(StopReason::is_safety_stop);
+        let adverse_event = resp.adverse_event
+            || safety_events
+                .iter()
+                .any(|s| matches!(s, StopReason::AdverseEvent(_)));
+
+        // The stimulus *as delivered*: a mid-session latch truncates the
+        // duration to the completed fraction (Finding 5). For a clean session
+        // this equals the planned stimulus, so the witness is unchanged.
+        let recorded_stimulus = if let Some(t) = stop_tick {
+            let fraction = (t + 1) as f64 / n_ticks as f64;
+            let mut truncated = *stimulus;
+            truncated.duration_minutes = stimulus.duration_minutes * fraction;
+            self.envelope.clamp(truncated)
+        } else {
+            *stimulus
+        };
+
+        // Finding 2: terminate-and-lock — engage the latched lock if the stop
+        // warrants it (persisted, so a new governor for this participant also
+        // refuses until acknowledged).
+        if let Some(stop) = safety_events.iter().find(|s| s.is_safety_stop()) {
+            if let Some(class) = lock_class_for(stop) {
+                self.safety_state
+                    .engage_lock(class, stop_tag(stop), timestamp_ms);
+            }
+        }
 
         // --- Score the session. ---
         let subjective = SubjectiveReport {
@@ -309,7 +439,7 @@ impl RufloGovernor {
             ruview: &resp.ruview,
             eeg: Some(&resp.eeg),
             subjective: &subjective,
-            adverse_event_risk: if resp.adverse_event { 1.0 } else { 0.0 },
+            adverse_event_risk: if adverse_event { 1.0 } else { 0.0 },
         });
 
         // --- Feed the optimizer only when the session was safe. ---
@@ -319,12 +449,12 @@ impl RufloGovernor {
 
         // --- Update RuVector memory + drift detection (ADR-250 §10 item 4). ---
         self.response.update(&SessionObservation {
-            stimulus: *stimulus,
+            stimulus: recorded_stimulus,
             ruview: resp.ruview,
             eeg: Some(resp.eeg),
             subjective,
             safety_pass,
-            adverse_event: resp.adverse_event,
+            adverse_event,
         });
         self.drift_status = self.drift.update(&self.response.as_array());
 
@@ -336,7 +466,7 @@ impl RufloGovernor {
             self.person_id.clone(),
             self.versions.clone(),
             timestamp_ms,
-            *stimulus,
+            recorded_stimulus,
             resp.ruview,
             subjective,
             Outcome {
@@ -352,163 +482,8 @@ impl RufloGovernor {
         self.audit.push(record.clone());
         Ok(record)
     }
-
-    /// Build the clinician export (ADR-250 §11 responsibility 9).
-    pub fn clinician_report(&self) -> ClinicianReport {
-        let n = self.audit.len();
-        let n_stops = self
-            .audit
-            .iter()
-            .flat_map(|r| &r.safety_events)
-            .filter(|e| e.is_safety_stop())
-            .count();
-        let mean = if n > 0 {
-            self.audit
-                .iter()
-                .map(|r| r.outcome.entrainment_score)
-                .sum::<f64>()
-                / n as f64
-        } else {
-            0.0
-        };
-        ClinicianReport {
-            person_id: self.person_id.clone(),
-            n_sessions: n,
-            n_safety_stops: n_stops,
-            best_frequency_hz: self.optimizer.best().map(|(f, _)| f),
-            mean_entrainment: mean,
-            adverse_event_recorded: self.response.adverse_event_flag >= 1.0,
-            claim: PRODUCT_CLAIM,
-        }
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn governor() -> RufloGovernor {
-        RufloGovernor::enroll(
-            "subject-A",
-            SafetyEnvelope::conservative(),
-            &[],
-            Consent::Granted,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn enroll_refuses_without_consent() {
-        let r = RufloGovernor::enroll(
-            "x",
-            SafetyEnvelope::conservative(),
-            &[],
-            Consent::Withdrawn,
-        );
-        assert_eq!(r.err(), Some(GovernanceError::NoConsent));
-    }
-
-    #[test]
-    fn enroll_refuses_excluded_condition() {
-        let r = RufloGovernor::enroll(
-            "x",
-            SafetyEnvelope::conservative(),
-            &[ExclusionCondition::EpilepsyOrSeizureHistory],
-            Consent::Granted,
-        );
-        assert!(matches!(r, Err(GovernanceError::Excluded(_))));
-    }
-
-    #[test]
-    fn enroll_requires_supervision_for_migraine() {
-        let r = RufloGovernor::enroll(
-            "x",
-            SafetyEnvelope::conservative(),
-            &[ExclusionCondition::SevereMigraineSensitivity],
-            Consent::Granted,
-        );
-        assert!(matches!(r, Err(GovernanceError::SupervisionRequired(_))));
-    }
-
-    #[test]
-    fn run_session_refuses_out_of_envelope_stimulus() {
-        let mut g = governor();
-        let sim = ResponseSimulator::new(1);
-        let latent = LatentPerson::from_id("subject-A");
-        let state = RuViewState::calm_baseline();
-        let mut bad = StimulusParameters::prior();
-        bad.frequency_hz = 60.0;
-        let r = g.run_session(&sim, &latent, &state, &bad, 0);
-        assert_eq!(r.err(), Some(GovernanceError::OutsideEnvelope));
-        assert!(g.audit_log().is_empty());
-    }
-
-    #[test]
-    fn withdrawn_consent_blocks_further_sessions() {
-        let mut g = governor();
-        let sim = ResponseSimulator::new(1);
-        let latent = LatentPerson::from_id("subject-A");
-        let state = RuViewState::calm_baseline();
-        g.run_session(&sim, &latent, &state, &StimulusParameters::prior(), 0)
-            .unwrap();
-        g.withdraw_consent();
-        let r = g.run_session(&sim, &latent, &state, &StimulusParameters::prior(), 1);
-        assert_eq!(r.err(), Some(GovernanceError::NoConsent));
-    }
-
-    #[test]
-    fn calibration_then_recommendation_lands_near_latent_peak() {
-        let mut g = governor();
-        let sim = ResponseSimulator::new(99);
-        let latent = LatentPerson::from_id("subject-peak");
-        let state = RuViewState::calm_baseline();
-        g.run_calibration(&sim, &latent, &state, 5.0, 0).unwrap();
-        let rec = g.recommend(&StimulusParameters::prior());
-        assert!(g.envelope.contains(&rec.stimulus));
-        // Optimizer should prefer a frequency within ±2 Hz of the true peak
-        // (calibration is short/noisy; ±2 Hz is a robust bound for the test).
-        assert!((rec.stimulus.frequency_hz - latent.peak_hz).abs() <= 2.0);
-    }
-
-    #[test]
-    fn every_session_is_witnessed_and_logged() {
-        let mut g = governor();
-        let sim = ResponseSimulator::new(5);
-        let latent = LatentPerson::from_id("subject-A");
-        let state = RuViewState::calm_baseline();
-        g.run_calibration(&sim, &latent, &state, 5.0, 0).unwrap();
-        assert_eq!(g.audit_log().len(), 9); // 36..44 Hz
-        for rec in g.audit_log() {
-            assert_eq!(rec.session_hash.len(), 64); // hex SHA-256
-        }
-    }
-
-    #[test]
-    fn sham_mode_suppresses_entrainment() {
-        let latent = LatentPerson::from_id("subject-strong");
-        let state = RuViewState::calm_baseline();
-        let sim = ResponseSimulator::new(11);
-        let mut peak = StimulusParameters::prior();
-        peak.frequency_hz = (latent.peak_hz * 10.0).round() / 10.0;
-        peak.frequency_hz = peak.frequency_hz.clamp(36.0, 44.0);
-
-        let mut open = governor();
-        let open_rec = open.run_session(&sim, &latent, &state, &peak, 0).unwrap();
-
-        let mut sham = governor();
-        sham.set_mode(TrialMode::Sham);
-        let sham_rec = sham.run_session(&sim, &latent, &state, &peak, 0).unwrap();
-
-        let open_g = open_rec.eeg_optional.unwrap().gamma_power_gain;
-        let sham_g = sham_rec.eeg_optional.unwrap().gamma_power_gain;
-        assert!(sham_g < open_g);
-    }
-
-    #[test]
-    fn clinician_report_uses_only_allowed_claim() {
-        let g = governor();
-        assert_eq!(g.clinician_report().claim, PRODUCT_CLAIM);
-        assert!(!PRODUCT_CLAIM.to_lowercase().contains("alzheimer"));
-        assert!(!PRODUCT_CLAIM.to_lowercase().contains("treat"));
-    }
-}
+#[path = "ruflo_tests.rs"]
+mod tests;

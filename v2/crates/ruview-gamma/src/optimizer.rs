@@ -385,8 +385,8 @@ impl ClosedLoopController {
 
 /// The 0.1 Hz candidate grid over the envelope (ADR-250 §18 ±0.1 Hz precision).
 fn fine_grid(envelope: &SafetyEnvelope) -> Vec<f64> {
-    let lo = (envelope.min_hz * 10.0).round() as i64;
-    let hi = (envelope.max_hz * 10.0).round() as i64;
+    let lo = (envelope.min_hz() * 10.0).round() as i64;
+    let hi = (envelope.max_hz() * 10.0).round() as i64;
     (lo..=hi).map(|i| i as f64 / 10.0).collect()
 }
 
@@ -433,7 +433,7 @@ mod tests {
         }
         let rec = bo.recommend(&env, &StimulusParameters::prior());
         assert!(env.contains(&rec.stimulus));
-        assert!(rec.stimulus.frequency_hz <= env.max_hz);
+        assert!(rec.stimulus.frequency_hz <= env.max_hz());
     }
 
     #[test]

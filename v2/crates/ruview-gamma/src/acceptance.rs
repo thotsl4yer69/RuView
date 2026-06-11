@@ -152,15 +152,21 @@ impl AcceptanceHarness {
 
         for r in 0..self.criteria.repeats.max(1) {
             let pid = format!("acc-{}-{}", program.id, r);
-            let mut gov = match RufloGovernor::enroll_program(&pid, program.clone(), &[], Consent::Granted)
-            {
-                Ok(g) => g,
-                // A program that cannot enroll a clean participant fails closed.
-                Err(_) => return self.failed_report(program, "enrollment_failed"),
-            };
+            let mut gov =
+                match RufloGovernor::enroll_program(&pid, program.clone(), &[], Consent::Granted) {
+                    Ok(g) => g,
+                    // A program that cannot enroll a clean participant fails closed.
+                    Err(_) => return self.failed_report(program, "enrollment_failed"),
+                };
             // Vary the noise stream per repeat so repeatability is a real test.
-            gov.run_calibration(&sim, person, state, program.prior.duration_minutes.min(5.0), r as u64)
-                .ok();
+            gov.run_calibration(
+                &sim,
+                person,
+                state,
+                program.prior.duration_minutes.min(5.0),
+                r as u64,
+            )
+            .ok();
 
             for rec in gov.audit_log() {
                 total_sessions += 1;
@@ -176,7 +182,11 @@ impl AcceptanceHarness {
             // Entrainment gain: adaptive recommendation vs the fixed prior.
             let mean = |stim: &StimulusParameters| -> f64 {
                 (0..16)
-                    .map(|i| sim.simulate(person, state, stim, 10_000 + i).eeg.gamma_power_gain)
+                    .map(|i| {
+                        sim.simulate(person, state, stim, 10_000 + i)
+                            .eeg
+                            .gamma_power_gain
+                    })
                     .sum::<f64>()
                     / 16.0
             };
@@ -203,8 +213,12 @@ impl AcceptanceHarness {
         let safety_pass = safety_stop_rate <= c.max_safety_stop_rate;
         let adherence_pass = mean_adherence >= c.min_adherence;
         let repeatability_pass = repeatability_band_hz <= c.max_repeatability_band_hz;
-        let overall_pass =
-            claim_allowed(entrainment_pass, safety_pass, adherence_pass, repeatability_pass);
+        let overall_pass = claim_allowed(
+            entrainment_pass,
+            safety_pass,
+            adherence_pass,
+            repeatability_pass,
+        );
 
         AcceptanceReport {
             program_id: program.id.to_string(),
@@ -277,7 +291,10 @@ mod tests {
             (true, true, true, false),
         ];
         for (e, s, a, r) in one_false {
-            assert!(!claim_allowed(e, s, a, r), "subset {e}{s}{a}{r} must be denied");
+            assert!(
+                !claim_allowed(e, s, a, r),
+                "subset {e}{s}{a}{r} must be denied"
+            );
         }
         assert!(!claim_allowed(false, false, false, false));
     }
@@ -306,8 +323,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let report =
-            harness.evaluate(&NeuroProgram::attention_working_memory(), &person, &RuViewState::calm_baseline());
+        let report = harness.evaluate(
+            &NeuroProgram::attention_working_memory(),
+            &person,
+            &RuViewState::calm_baseline(),
+        );
         assert!(!report.overall_pass);
         assert!(!report.entrainment_pass);
         assert_eq!(report.claim_gate().claim(), NO_CLAIM);

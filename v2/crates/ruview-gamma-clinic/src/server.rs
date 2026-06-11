@@ -153,11 +153,17 @@ async fn cohort(State(store): State<SharedStore>) -> Json<CohortView> {
     let profiles = s.profiles();
     let n = profiles.len();
     if n == 0 {
-        return Json(CohortView { clusters: Vec::new() });
+        return Json(CohortView {
+            clusters: Vec::new(),
+        });
     }
     let k = 3.min(n);
     let assign = profiles.cluster(k, 10);
-    let mut clusters: Vec<Cluster> = (0..k).map(|_| Cluster { members: Vec::new() }).collect();
+    let mut clusters: Vec<Cluster> = (0..k)
+        .map(|_| Cluster {
+            members: Vec::new(),
+        })
+        .collect();
     for (i, &c) in assign.iter().enumerate() {
         if let Some(p) = profiles.profile(i) {
             clusters[c].members.push(p.profile_tag.clone());
@@ -192,7 +198,9 @@ mod tests {
     use tower::ServiceExt;
 
     async fn body_json(res: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -260,7 +268,9 @@ mod tests {
         let r = router(seeded_store());
         let res = get(&r, "/").await;
         assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("Clinical Dashboard"));
         assert!(html.contains("research use only"));
@@ -289,7 +299,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_participant_is_404() {
         let r = router(seeded_store());
-        assert_eq!(get(&r, "/api/clinic/participants/nobody").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            get(&r, "/api/clinic/participants/nobody").await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -299,11 +312,20 @@ mod tests {
         let list = v.as_array().unwrap();
         assert_eq!(list.len(), 2);
         // The failed program surfaces NO_CLAIM verbatim — never its raw claim.
-        let withheld = list.iter().find(|a| a["program_id"] == "home-wellness").unwrap();
+        let withheld = list
+            .iter()
+            .find(|a| a["program_id"] == "home-wellness")
+            .unwrap();
         assert_eq!(withheld["overall_pass"], false);
         assert_eq!(withheld["released_claim"], NO_CLAIM);
-        let passed = list.iter().find(|a| a["program_id"] == "attention-working-memory").unwrap();
-        assert_eq!(passed["released_claim"], "personalized frequency-response discovery");
+        let passed = list
+            .iter()
+            .find(|a| a["program_id"] == "attention-working-memory")
+            .unwrap();
+        assert_eq!(
+            passed["released_claim"],
+            "personalized frequency-response discovery"
+        );
     }
 
     #[tokio::test]

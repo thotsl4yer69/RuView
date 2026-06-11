@@ -12,10 +12,16 @@
 //! | Test | Target |
 //! |------|--------|
 //! | LED frequency accuracy | ±0.1 Hz |
+//! | Worst-case frequency error over the session window | ±0.1 Hz |
+//! | Worst-case half-period jitter over the session window | ≤ 500 µs |
 //! | Audio-visual sync drift | < 5 ms |
 //! | Stop signal → actuator off | < 100 ms |
 //! | Session-hash reproducibility | 100% |
 //! | EEG entrainment lift vs fixed 40 Hz | ≥ 20% |
+//!
+//! Every criterion fails closed: a NaN/non-finite measurement, an impossible
+//! hash count (`reproduced > total`), or an empty replay set all grade as
+//! FAIL, never as "unknown".
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +39,11 @@ pub struct HilTargets {
     pub min_hash_reproducibility: f64,
     /// Min EEG entrainment lift over fixed 40 Hz, as a fraction.
     pub min_eeg_lift: f64,
+    /// Max worst-case half-period jitter over the session window, µs.
+    /// Grades delivered regularity, not a point estimate: a bench run must
+    /// report the worst half-period deviation it saw, captured at the sync
+    /// pin across the whole session.
+    pub max_half_period_jitter_us: f64,
 }
 
 impl Default for HilTargets {
@@ -43,6 +54,9 @@ impl Default for HilTargets {
             max_stop_latency_ms: 100.0,
             min_hash_reproducibility: 1.0,
             min_eeg_lift: 0.20,
+            // 500 µs is ~4% of the shortest half-period (11.4 ms @ 44 Hz):
+            // generous for ISR latency, tight enough to catch a wobbling timer.
+            max_half_period_jitter_us: 500.0,
         }
     }
 }
@@ -55,8 +69,15 @@ impl Default for HilTargets {
 pub struct HilMeasurement {
     /// Commanded frequency the controller asked for (Hz).
     pub commanded_frequency_hz: f64,
-    /// Frequency actually measured at the LED (Hz).
+    /// Frequency actually measured at the LED (Hz) — session mean.
     pub measured_frequency_hz: f64,
+    /// Worst-case |measured − commanded| frequency over the whole session
+    /// window (Hz). Graded against the same ±0.1 Hz budget as the mean, so
+    /// the bench measures delivered regularity, not a point estimate.
+    pub max_abs_freq_error_hz: f64,
+    /// Worst-case half-period jitter over the session window (µs), measured
+    /// at the sync pin.
+    pub max_half_period_jitter_us: f64,
     /// Measured audio-visual onset skew (ms).
     pub av_sync_drift_ms: f64,
     /// Measured stop-assert → actuator-off latency (ms).
@@ -75,6 +96,12 @@ pub struct HilMeasurement {
 pub struct HilReport {
     pub frequency_error_hz: f64,
     pub frequency_pass: bool,
+    /// Worst-case frequency error over the session window (echoed from the
+    /// measurement) and its verdict against the same ±0.1 Hz budget.
+    pub worst_frequency_error_hz: f64,
+    pub worst_frequency_pass: bool,
+    /// Worst-case half-period jitter verdict (delivered regularity).
+    pub jitter_pass: bool,
     pub av_sync_pass: bool,
     pub stop_latency_pass: bool,
     pub hash_reproducibility: f64,
@@ -86,30 +113,69 @@ pub struct HilReport {
 }
 
 /// Grade a [`HilMeasurement`] against [`HilTargets`].
+///
+/// Fails closed on bad data: any non-finite (NaN/inf) measurement and any
+/// impossible hash count (`hashes_reproduced > hashes_total`) grades as FAIL.
 pub fn verify_hil(m: &HilMeasurement, t: &HilTargets) -> HilReport {
+    // Session-mean frequency error. A NaN in either operand yields a NaN
+    // error; the explicit is_finite() makes the fail-closed intent visible
+    // instead of relying on NaN comparison semantics.
     let frequency_error_hz = (m.measured_frequency_hz - m.commanded_frequency_hz).abs();
-    let frequency_pass = frequency_error_hz <= t.max_frequency_error_hz;
-    let av_sync_pass = m.av_sync_drift_ms.abs() <= t.max_av_sync_drift_ms;
+    let frequency_pass =
+        frequency_error_hz.is_finite() && frequency_error_hz <= t.max_frequency_error_hz;
+
+    // Worst-case-over-window regularity: the same ±0.1 Hz budget must hold
+    // for the worst excursion, not just the mean. A negative "worst absolute
+    // error" is self-contradictory bench data ⇒ fail closed.
+    let worst_frequency_error_hz = m.max_abs_freq_error_hz;
+    let worst_frequency_pass = worst_frequency_error_hz.is_finite()
+        && worst_frequency_error_hz >= 0.0
+        && worst_frequency_error_hz <= t.max_frequency_error_hz;
+
+    let jitter_pass = m.max_half_period_jitter_us.is_finite()
+        && m.max_half_period_jitter_us >= 0.0
+        && m.max_half_period_jitter_us <= t.max_half_period_jitter_us;
+
+    let av_sync_pass =
+        m.av_sync_drift_ms.is_finite() && m.av_sync_drift_ms.abs() <= t.max_av_sync_drift_ms;
+
     // Stop latency must be finite and within bound (a missing/NaN measurement
     // fails closed).
     let stop_latency_pass =
         m.stop_latency_ms.is_finite() && m.stop_latency_ms <= t.max_stop_latency_ms;
-    let hash_reproducibility = if m.hashes_total > 0 {
-        m.hashes_reproduced as f64 / m.hashes_total as f64
+
+    // hashes_reproduced > hashes_total is impossible for honest bench data;
+    // treat it as an invalid measurement, never as >100% reproducibility.
+    let hash_reproducibility = if m.hashes_total == 0 || m.hashes_reproduced > m.hashes_total {
+        0.0 // nothing replayed, or corrupt counts ⇒ unproven ⇒ fail closed
     } else {
-        0.0 // nothing replayed ⇒ unproven ⇒ fail closed
+        m.hashes_reproduced as f64 / m.hashes_total as f64
     };
     let hash_pass = hash_reproducibility >= t.min_hash_reproducibility;
-    let baseline = m.eeg_entrainment_fixed_40hz.max(1e-6);
-    let eeg_lift = (m.eeg_entrainment_adaptive - baseline) / baseline;
-    let eeg_lift_pass = eeg_lift >= t.min_eeg_lift;
 
-    let overall_pass =
-        frequency_pass && av_sync_pass && stop_latency_pass && hash_pass && eeg_lift_pass;
+    let eeg_lift =
+        if m.eeg_entrainment_adaptive.is_finite() && m.eeg_entrainment_fixed_40hz.is_finite() {
+            let baseline = m.eeg_entrainment_fixed_40hz.max(1e-6);
+            (m.eeg_entrainment_adaptive - baseline) / baseline
+        } else {
+            f64::NAN // propagate so the verdict below fails closed
+        };
+    let eeg_lift_pass = eeg_lift.is_finite() && eeg_lift >= t.min_eeg_lift;
+
+    let overall_pass = frequency_pass
+        && worst_frequency_pass
+        && jitter_pass
+        && av_sync_pass
+        && stop_latency_pass
+        && hash_pass
+        && eeg_lift_pass;
 
     HilReport {
         frequency_error_hz,
         frequency_pass,
+        worst_frequency_error_hz,
+        worst_frequency_pass,
+        jitter_pass,
         av_sync_pass,
         stop_latency_pass,
         hash_reproducibility,
@@ -127,9 +193,11 @@ mod tests {
     fn passing() -> HilMeasurement {
         HilMeasurement {
             commanded_frequency_hz: 40.0,
-            measured_frequency_hz: 40.05, // within ±0.1 Hz
-            av_sync_drift_ms: 2.0,         // < 5 ms
-            stop_latency_ms: 40.0,         // < 100 ms
+            measured_frequency_hz: 40.05,     // within ±0.1 Hz (mean)
+            max_abs_freq_error_hz: 0.08,      // worst case also within ±0.1 Hz
+            max_half_period_jitter_us: 120.0, // < 500 µs
+            av_sync_drift_ms: 2.0,            // < 5 ms
+            stop_latency_ms: 40.0,            // < 100 ms
             hashes_reproduced: 100,
             hashes_total: 100, // 100%
             eeg_entrainment_adaptive: 0.36,
@@ -199,5 +267,75 @@ mod tests {
         let mut m = passing();
         m.av_sync_drift_ms = 7.5;
         assert!(!verify_hil(&m, &HilTargets::default()).av_sync_pass);
+    }
+
+    #[test]
+    fn worst_case_drift_beyond_budget_fails_even_when_mean_passes() {
+        let mut m = passing();
+        m.max_abs_freq_error_hz = 0.25; // mean is 0.05 Hz, worst case is not
+        let r = verify_hil(&m, &HilTargets::default());
+        assert!(r.frequency_pass);
+        assert!(!r.worst_frequency_pass);
+        assert!(!r.overall_pass);
+    }
+
+    #[test]
+    fn half_period_jitter_beyond_budget_fails() {
+        let mut m = passing();
+        m.max_half_period_jitter_us = 900.0;
+        let r = verify_hil(&m, &HilTargets::default());
+        assert!(!r.jitter_pass);
+        assert!(!r.overall_pass);
+    }
+
+    #[test]
+    fn nan_measurements_fail_closed_per_criterion() {
+        let t = HilTargets::default();
+
+        let mut m = passing();
+        m.measured_frequency_hz = f64::NAN;
+        assert!(!verify_hil(&m, &t).frequency_pass);
+
+        let mut m = passing();
+        m.max_abs_freq_error_hz = f64::NAN;
+        assert!(!verify_hil(&m, &t).worst_frequency_pass);
+
+        let mut m = passing();
+        m.max_half_period_jitter_us = f64::NAN;
+        assert!(!verify_hil(&m, &t).jitter_pass);
+
+        let mut m = passing();
+        m.av_sync_drift_ms = f64::NAN;
+        assert!(!verify_hil(&m, &t).av_sync_pass);
+
+        let mut m = passing();
+        m.eeg_entrainment_fixed_40hz = f64::NAN;
+        assert!(!verify_hil(&m, &t).eeg_lift_pass);
+
+        let mut m = passing();
+        m.eeg_entrainment_adaptive = f64::NAN;
+        assert!(!verify_hil(&m, &t).eeg_lift_pass);
+    }
+
+    #[test]
+    fn negative_worst_case_values_fail_closed() {
+        let t = HilTargets::default();
+        let mut m = passing();
+        m.max_abs_freq_error_hz = -0.01; // impossible absolute error
+        assert!(!verify_hil(&m, &t).worst_frequency_pass);
+        let mut m = passing();
+        m.max_half_period_jitter_us = -5.0;
+        assert!(!verify_hil(&m, &t).jitter_pass);
+    }
+
+    #[test]
+    fn impossible_hash_counts_fail_closed() {
+        let mut m = passing();
+        m.hashes_reproduced = 101; // > hashes_total: corrupt bench data
+        m.hashes_total = 100;
+        let r = verify_hil(&m, &HilTargets::default());
+        assert!(!r.hash_pass);
+        assert_eq!(r.hash_reproducibility, 0.0); // never reported as >100%
+        assert!(!r.overall_pass);
     }
 }

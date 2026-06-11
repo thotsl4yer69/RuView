@@ -133,12 +133,10 @@ impl NeuroProgram {
             display_name: "Post-Stroke Cognition (recovery state tracking)",
             evidence_level: EvidenceLevel::EarlyHuman,
             claim: "personalized entrainment optimization with recovery-state monitoring",
-            envelope: SafetyEnvelope {
-                brightness_cap: 0.32,
-                volume_cap: 0.32,
-                max_duration_minutes: 12.0,
-                ..SafetyEnvelope::conservative()
-            },
+            envelope: SafetyEnvelope::conservative()
+                .with_caps(0.32, 0.32)
+                .and_then(|e| e.with_max_duration_minutes(12.0))
+                .expect("post-stroke envelope is within the absolute bounds"),
             prior,
             weights,
             eligible_states: &[SleepState::QuietWake, SleepState::Drowsy],
@@ -167,15 +165,17 @@ impl NeuroProgram {
             display_name: "Sleep Optimization (state-timed gamma)",
             evidence_level: EvidenceLevel::EarlyHuman,
             claim: "sleep-state-timed entrainment optimization",
-            envelope: SafetyEnvelope {
-                brightness_cap: 0.10, // near-dark
-                volume_cap: 0.25,
-                max_duration_minutes: 30.0,
-                ..SafetyEnvelope::conservative()
-            },
+            envelope: SafetyEnvelope::conservative()
+                .with_caps(0.10, 0.25) // near-dark
+                .and_then(|e| e.with_max_duration_minutes(30.0))
+                .expect("sleep envelope is within the absolute bounds"),
             prior,
             weights,
-            eligible_states: &[SleepState::Drowsy, SleepState::Asleep, SleepState::QuietWake],
+            eligible_states: &[
+                SleepState::Drowsy,
+                SleepState::Asleep,
+                SleepState::QuietWake,
+            ],
             time_preference: TimePreference::PreSleepOrSleep,
         }
     }
@@ -219,11 +219,9 @@ impl NeuroProgram {
             display_name: "Mood & Arousal Regulation (calming-response tuning)",
             evidence_level: EvidenceLevel::EarlyHuman,
             claim: "personalized calming-response optimization",
-            envelope: SafetyEnvelope {
-                brightness_cap: 0.30,
-                volume_cap: 0.30,
-                ..SafetyEnvelope::conservative()
-            },
+            envelope: SafetyEnvelope::conservative()
+                .with_caps(0.30, 0.30)
+                .expect("mood-arousal envelope is within the absolute bounds"),
             prior,
             weights,
             eligible_states: &[SleepState::QuietWake, SleepState::Drowsy],
@@ -244,12 +242,10 @@ impl NeuroProgram {
             display_name: "Home Neuro-Wellness (no treatment claim)",
             evidence_level: EvidenceLevel::Speculative,
             claim: "personal neural-rhythm wellness optimization",
-            envelope: SafetyEnvelope {
-                brightness_cap: 0.28,
-                volume_cap: 0.28,
-                max_duration_minutes: 10.0,
-                ..SafetyEnvelope::conservative()
-            },
+            envelope: SafetyEnvelope::conservative()
+                .with_caps(0.28, 0.28)
+                .and_then(|e| e.with_max_duration_minutes(10.0))
+                .expect("home-wellness envelope is within the absolute bounds"),
             prior,
             weights: ObjectiveWeights::default(),
             eligible_states: &[SleepState::QuietWake],
@@ -306,7 +302,13 @@ mod tests {
 
     #[test]
     fn no_program_claim_is_a_disease_treatment_claim() {
-        let banned = ["treat", "cure", "alzheimer", "stroke recovery cure", "therapy for"];
+        let banned = [
+            "treat",
+            "cure",
+            "alzheimer",
+            "stroke recovery cure",
+            "therapy for",
+        ];
         for p in NeuroProgram::catalog() {
             let claim = p.claim.to_lowercase();
             for b in banned {
@@ -349,7 +351,7 @@ mod tests {
 
     #[test]
     fn sleep_program_caps_brightness_near_dark() {
-        assert!(NeuroProgram::sleep_optimization().envelope.brightness_cap <= 0.10);
+        assert!(NeuroProgram::sleep_optimization().envelope.brightness_cap() <= 0.10);
     }
 
     #[test]

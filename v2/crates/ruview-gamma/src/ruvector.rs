@@ -157,7 +157,11 @@ impl ProfileStore {
             .enumerate()
             .map(|(i, p)| (i, unit_distance(&q, &normalize(&p.vector))))
             .collect();
-        d.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        d.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
         d.truncate(k);
         d
     }
@@ -199,8 +203,7 @@ impl ProfileStore {
                 buckets.entry(q).or_default().push((score, w));
             }
         }
-        let mean_dist =
-            neighbors.iter().map(|(_, d)| d).sum::<f64>() / neighbors.len() as f64;
+        let mean_dist = neighbors.iter().map(|(_, d)| d).sum::<f64>() / neighbors.len() as f64;
         buckets
             .into_iter()
             .map(|(q, entries)| {
@@ -215,8 +218,7 @@ impl ProfileStore {
                     frequency_hz: q as f64 / 10.0,
                     expected_score: mean,
                     // Floor × base, inflated by cohort disagreement and distance.
-                    noise_var: base_noise * Self::PRIOR_NOISE_FLOOR * (1.0 + mean_dist)
-                        + var,
+                    noise_var: base_noise * Self::PRIOR_NOISE_FLOOR * (1.0 + mean_dist) + var,
                 }
             })
             .collect()
@@ -252,7 +254,10 @@ impl ProfileStore {
                         .fold(f64::INFINITY, f64::min);
                     (i, dmin)
                 })
-                .fold((0usize, -1.0f64), |acc, (i, d)| if d > acc.1 { (i, d) } else { acc });
+                .fold(
+                    (0usize, -1.0f64),
+                    |acc, (i, d)| if d > acc.1 { (i, d) } else { acc },
+                );
             centers.push(pts[far_idx]);
         }
 

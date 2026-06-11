@@ -108,36 +108,262 @@ pub enum EnvelopeViolation {
     NonFinite { field: &'static str },
 }
 
+/// Compiled-in **absolute** bounds — the floor under every envelope (Finding 3,
+/// 2026-06-11 safety review). No `SafetyEnvelope` can be constructed (by code,
+/// builder, or deserialization) that violates these. They make safety a
+/// property of *construction*, not of default values, mirroring the firmware's
+/// compiled-in stance.
+pub mod absolute {
+    /// Hard frequency floor (Hz). Chosen **>= 30 Hz** so the entire envelope —
+    /// including its lowest edge — sits above the photosensitive/provocative
+    /// 15–25 Hz flicker band with margin. A config can never push stimulation
+    /// into that band.
+    pub const MIN_HZ: f64 = 30.0;
+    /// Hard frequency ceiling (Hz). Above the 36–44 Hz search band with room
+    /// for future programs, bounded so the actuator is never driven absurdly fast.
+    pub const MAX_HZ: f64 = 60.0;
+    /// Hard brightness cap — no envelope may uncap flicker brightness toward 1.0.
+    pub const BRIGHTNESS_CAP: f64 = 0.6;
+    /// Hard volume cap — comfort ceiling.
+    pub const VOLUME_CAP: f64 = 0.6;
+    /// Hard maximum single-session duration (minutes) — no `1e6`-minute sessions.
+    pub const MAX_DURATION_MINUTES: f64 = 30.0;
+    /// Hard maximum absolute inter-modality phase offset (ms).
+    pub const MAX_PHASE_OFFSET_MS: f64 = 20.0;
+}
+
+/// Why an attempted [`SafetyEnvelope`] construction was rejected. Every variant
+/// is a *safe* refusal: a rejected envelope is never built, so deserialization
+/// of a hostile config fails closed instead of silently widening the bounds.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum EnvelopeError {
+    /// A field was NaN/Inf.
+    #[error("envelope field `{field}` is not finite")]
+    NonFinite { field: &'static str },
+    /// `min_hz` below the compiled-in photosensitive-safe floor.
+    #[error("min_hz {min_hz} is below the absolute floor {floor} Hz (photosensitive-band guard)")]
+    FrequencyFloor { min_hz: f64, floor: f64 },
+    /// `max_hz` above the compiled-in ceiling.
+    #[error("max_hz {max_hz} exceeds the absolute ceiling {ceiling} Hz")]
+    FrequencyCeiling { max_hz: f64, ceiling: f64 },
+    /// Band is empty or inverted.
+    #[error("frequency band is empty/inverted: min_hz {min_hz} >= max_hz {max_hz}")]
+    BandInverted { min_hz: f64, max_hz: f64 },
+    /// Brightness cap out of `[0, ABS]`.
+    #[error("brightness_cap {cap} outside [0, {abs}]")]
+    BrightnessCap { cap: f64, abs: f64 },
+    /// Volume cap out of `[0, ABS]`.
+    #[error("volume_cap {cap} outside [0, {abs}]")]
+    VolumeCap { cap: f64, abs: f64 },
+    /// Duration out of `(0, ABS]`.
+    #[error("max_duration_minutes {minutes} outside (0, {abs}]")]
+    Duration { minutes: f64, abs: f64 },
+    /// Phase offset cap out of `[0, ABS]`.
+    #[error("max_phase_offset_ms {ms} outside [0, {abs}]")]
+    PhaseOffset { ms: f64, abs: f64 },
+}
+
 /// The predefined safety envelope. Optimization happens **only inside** these
 /// bounds; the system "must never autonomously expand beyond the allowed safety
 /// envelope" (ADR-250 §12). The envelope itself is data, never widened by the
 /// optimizer — only an operator constructs a wider one deliberately.
+///
+/// **Safety by construction (Finding 3, 2026-06-11 review):** the bound fields
+/// are private and reachable only through [`SafetyEnvelope::try_new`] (and the
+/// `with_*` builders), which reject anything outside the compiled-in
+/// [`absolute`] bounds. Deserialization routes through the same validator via
+/// `#[serde(try_from)]`, so no config — however hostile — can place the band in
+/// the 15–25 Hz photosensitive zone, uncap brightness/volume toward 1.0, or set
+/// a million-minute session.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(into = "SafetyEnvelopeWire", try_from = "SafetyEnvelopeWire")]
 pub struct SafetyEnvelope {
-    pub min_hz: f64,
-    pub max_hz: f64,
-    /// Hard brightness cap — flicker-exposure conservatism (ADR-250 §12, OQ 7).
-    pub brightness_cap: f64,
-    /// Hard volume cap — comfort conservatism.
-    pub volume_cap: f64,
-    /// Maximum session duration for the current stage.
-    pub max_duration_minutes: f64,
-    /// Maximum absolute inter-modality phase offset.
-    pub max_phase_offset_ms: f64,
+    min_hz: f64,
+    max_hz: f64,
+    brightness_cap: f64,
+    volume_cap: f64,
+    max_duration_minutes: f64,
+    max_phase_offset_ms: f64,
+}
+
+/// Transparent serde mirror of [`SafetyEnvelope`]. Deserialization always passes
+/// through [`SafetyEnvelope::try_new`] (`try_from`), so the absolute bounds
+/// cannot be bypassed; serialization is a plain projection (`into`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct SafetyEnvelopeWire {
+    min_hz: f64,
+    max_hz: f64,
+    brightness_cap: f64,
+    volume_cap: f64,
+    max_duration_minutes: f64,
+    max_phase_offset_ms: f64,
+}
+
+impl From<SafetyEnvelope> for SafetyEnvelopeWire {
+    fn from(e: SafetyEnvelope) -> Self {
+        Self {
+            min_hz: e.min_hz,
+            max_hz: e.max_hz,
+            brightness_cap: e.brightness_cap,
+            volume_cap: e.volume_cap,
+            max_duration_minutes: e.max_duration_minutes,
+            max_phase_offset_ms: e.max_phase_offset_ms,
+        }
+    }
+}
+
+impl TryFrom<SafetyEnvelopeWire> for SafetyEnvelope {
+    type Error = EnvelopeError;
+    fn try_from(w: SafetyEnvelopeWire) -> Result<Self, Self::Error> {
+        Self::try_new(
+            w.min_hz,
+            w.max_hz,
+            w.brightness_cap,
+            w.volume_cap,
+            w.max_duration_minutes,
+            w.max_phase_offset_ms,
+        )
+    }
 }
 
 impl SafetyEnvelope {
-    /// Conservative research-grade default envelope (ADR-250 §5 default ranges,
-    /// "safety_profile: conservative").
-    pub fn conservative() -> Self {
-        Self {
-            min_hz: 36.0,
-            max_hz: 44.0,
-            brightness_cap: 0.40,
-            volume_cap: 0.40,
-            max_duration_minutes: 15.0,
-            max_phase_offset_ms: 5.0,
+    /// Construct an envelope, enforcing the compiled-in [`absolute`] bounds. The
+    /// **only** constructor; `conservative()` and the `with_*` builders all route
+    /// through it, and so does deserialization. Returns [`EnvelopeError`] (a safe
+    /// refusal) for any out-of-bounds request.
+    pub fn try_new(
+        min_hz: f64,
+        max_hz: f64,
+        brightness_cap: f64,
+        volume_cap: f64,
+        max_duration_minutes: f64,
+        max_phase_offset_ms: f64,
+    ) -> Result<Self, EnvelopeError> {
+        for (field, v) in [
+            ("min_hz", min_hz),
+            ("max_hz", max_hz),
+            ("brightness_cap", brightness_cap),
+            ("volume_cap", volume_cap),
+            ("max_duration_minutes", max_duration_minutes),
+            ("max_phase_offset_ms", max_phase_offset_ms),
+        ] {
+            if !v.is_finite() {
+                return Err(EnvelopeError::NonFinite { field });
+            }
         }
+        if min_hz < absolute::MIN_HZ {
+            return Err(EnvelopeError::FrequencyFloor {
+                min_hz,
+                floor: absolute::MIN_HZ,
+            });
+        }
+        if max_hz > absolute::MAX_HZ {
+            return Err(EnvelopeError::FrequencyCeiling {
+                max_hz,
+                ceiling: absolute::MAX_HZ,
+            });
+        }
+        if min_hz >= max_hz {
+            return Err(EnvelopeError::BandInverted { min_hz, max_hz });
+        }
+        if !(0.0..=absolute::BRIGHTNESS_CAP).contains(&brightness_cap) {
+            return Err(EnvelopeError::BrightnessCap {
+                cap: brightness_cap,
+                abs: absolute::BRIGHTNESS_CAP,
+            });
+        }
+        if !(0.0..=absolute::VOLUME_CAP).contains(&volume_cap) {
+            return Err(EnvelopeError::VolumeCap {
+                cap: volume_cap,
+                abs: absolute::VOLUME_CAP,
+            });
+        }
+        if max_duration_minutes <= 0.0 || max_duration_minutes > absolute::MAX_DURATION_MINUTES {
+            return Err(EnvelopeError::Duration {
+                minutes: max_duration_minutes,
+                abs: absolute::MAX_DURATION_MINUTES,
+            });
+        }
+        if !(0.0..=absolute::MAX_PHASE_OFFSET_MS).contains(&max_phase_offset_ms) {
+            return Err(EnvelopeError::PhaseOffset {
+                ms: max_phase_offset_ms,
+                abs: absolute::MAX_PHASE_OFFSET_MS,
+            });
+        }
+        Ok(Self {
+            min_hz,
+            max_hz,
+            brightness_cap,
+            volume_cap,
+            max_duration_minutes,
+            max_phase_offset_ms,
+        })
+    }
+
+    /// Lower band edge (Hz). Always `>= absolute::MIN_HZ`.
+    pub fn min_hz(&self) -> f64 {
+        self.min_hz
+    }
+    /// Upper band edge (Hz). Always `<= absolute::MAX_HZ`.
+    pub fn max_hz(&self) -> f64 {
+        self.max_hz
+    }
+    /// Hard brightness cap. Always `<= absolute::BRIGHTNESS_CAP`.
+    pub fn brightness_cap(&self) -> f64 {
+        self.brightness_cap
+    }
+    /// Hard volume cap. Always `<= absolute::VOLUME_CAP`.
+    pub fn volume_cap(&self) -> f64 {
+        self.volume_cap
+    }
+    /// Maximum session duration (minutes). Always `<= absolute::MAX_DURATION_MINUTES`.
+    pub fn max_duration_minutes(&self) -> f64 {
+        self.max_duration_minutes
+    }
+    /// Maximum absolute inter-modality phase offset (ms).
+    pub fn max_phase_offset_ms(&self) -> f64 {
+        self.max_phase_offset_ms
+    }
+
+    /// Re-band an existing envelope (re-validated against the absolute bounds).
+    pub fn with_band(self, min_hz: f64, max_hz: f64) -> Result<Self, EnvelopeError> {
+        Self::try_new(
+            min_hz,
+            max_hz,
+            self.brightness_cap,
+            self.volume_cap,
+            self.max_duration_minutes,
+            self.max_phase_offset_ms,
+        )
+    }
+    /// Override the intensity caps (re-validated against the absolute bounds).
+    pub fn with_caps(self, brightness_cap: f64, volume_cap: f64) -> Result<Self, EnvelopeError> {
+        Self::try_new(
+            self.min_hz,
+            self.max_hz,
+            brightness_cap,
+            volume_cap,
+            self.max_duration_minutes,
+            self.max_phase_offset_ms,
+        )
+    }
+    /// Override the maximum session duration (re-validated against the absolute bounds).
+    pub fn with_max_duration_minutes(self, minutes: f64) -> Result<Self, EnvelopeError> {
+        Self::try_new(
+            self.min_hz,
+            self.max_hz,
+            self.brightness_cap,
+            self.volume_cap,
+            minutes,
+            self.max_phase_offset_ms,
+        )
+    }
+
+    /// Conservative research-grade default envelope (ADR-250 §5 default ranges,
+    /// "safety_profile: conservative"). Well inside every [`absolute`] bound.
+    pub fn conservative() -> Self {
+        Self::try_new(36.0, 44.0, 0.40, 0.40, 15.0, 5.0)
+            .expect("conservative envelope is within the compiled-in absolute bounds")
     }
 
     /// `true` iff every field of `s` lies inside the envelope and is finite.
@@ -203,8 +429,11 @@ impl SafetyEnvelope {
         s.frequency_hz = clamp_safe(s.frequency_hz, self.min_hz, self.max_hz);
         s.brightness_level = clamp_safe(s.brightness_level, 0.0, self.brightness_cap);
         s.volume_level = clamp_safe(s.volume_level, 0.0, self.volume_cap);
-        s.phase_offset_ms =
-            clamp_safe(s.phase_offset_ms, -self.max_phase_offset_ms, self.max_phase_offset_ms);
+        s.phase_offset_ms = clamp_safe(
+            s.phase_offset_ms,
+            -self.max_phase_offset_ms,
+            self.max_phase_offset_ms,
+        );
         // Duration must be strictly positive; floor at 1 minute.
         s.duration_minutes = clamp_safe(s.duration_minutes, 1.0, self.max_duration_minutes);
         s
@@ -220,65 +449,5 @@ impl SafetyEnvelope {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prior_is_inside_conservative_envelope() {
-        let env = SafetyEnvelope::conservative();
-        assert!(env.contains(&StimulusParameters::prior()));
-    }
-
-    #[test]
-    fn frequency_outside_band_is_rejected() {
-        let env = SafetyEnvelope::conservative();
-        let mut s = StimulusParameters::prior();
-        s.frequency_hz = 50.0;
-        let err = env.validate(&s).unwrap_err();
-        assert!(matches!(err[0], EnvelopeViolation::Frequency { .. }));
-    }
-
-    #[test]
-    fn brightness_above_cap_is_rejected() {
-        let env = SafetyEnvelope::conservative();
-        let mut s = StimulusParameters::prior();
-        s.brightness_level = 0.9;
-        assert!(!env.contains(&s));
-    }
-
-    #[test]
-    fn clamp_output_is_always_contained() {
-        let env = SafetyEnvelope::conservative();
-        let hostile = StimulusParameters {
-            frequency_hz: 1000.0,
-            modality: Modality::Visual,
-            brightness_level: 5.0,
-            volume_level: -2.0,
-            duty_cycle: DutyCycle::Pulsed,
-            phase_offset_ms: 999.0,
-            duration_minutes: 1e6,
-        };
-        assert!(env.contains(&env.clamp(hostile)));
-    }
-
-    #[test]
-    fn clamp_neutralizes_nan() {
-        let env = SafetyEnvelope::conservative();
-        let mut s = StimulusParameters::prior();
-        s.frequency_hz = f64::NAN;
-        s.brightness_level = f64::INFINITY;
-        let c = env.clamp(s);
-        assert!(env.contains(&c));
-        assert_eq!(c.frequency_hz, env.min_hz);
-        assert_eq!(c.brightness_level, 0.0);
-    }
-
-    #[test]
-    fn calibration_grid_is_36_to_44() {
-        let env = SafetyEnvelope::conservative();
-        let grid = env.calibration_frequencies();
-        assert_eq!(grid.first(), Some(&36.0));
-        assert_eq!(grid.last(), Some(&44.0));
-        assert_eq!(grid.len(), 9);
-    }
-}
+#[path = "stimulus_tests.rs"]
+mod tests;

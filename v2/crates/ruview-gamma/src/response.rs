@@ -221,8 +221,7 @@ impl PersonResponseVector {
             self.phase_locking_value = blend(self.phase_locking_value, eeg.phase_locking_value);
         }
         self.breathing_rate = blend(self.breathing_rate, obs.ruview.breathing_rate);
-        self.breathing_stability =
-            blend(self.breathing_stability, obs.ruview.breathing_stability);
+        self.breathing_stability = blend(self.breathing_stability, obs.ruview.breathing_stability);
         self.motion_artifact = blend(self.motion_artifact, obs.ruview.motion_artifact);
         self.posture_state = posture_ordinal(obs.ruview.posture);
         self.sleep_state = sleep_ordinal(obs.ruview.sleep_state);

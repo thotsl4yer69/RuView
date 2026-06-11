@@ -8,8 +8,8 @@
 //! published reference. Any silent drift in any of them shifts the digest and
 //! the test fails loudly.
 
-use crate::ruflo::{Consent, RufloGovernor};
 use crate::response::RuViewState;
+use crate::ruflo::{Consent, RufloGovernor};
 use crate::simulator::{stable_hash, LatentPerson, ResponseSimulator};
 use crate::stimulus::SafetyEnvelope;
 

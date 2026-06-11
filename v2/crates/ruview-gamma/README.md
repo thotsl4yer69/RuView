@@ -54,10 +54,15 @@ targets:
 | Test | Target |
 |------|--------|
 | LED frequency accuracy | ±0.1 Hz |
+| Worst-case frequency error over the session window | ±0.1 Hz |
+| Worst-case half-period jitter over the session window | ≤ 500 µs |
 | Audio-visual sync drift | < 5 ms |
 | Stop signal → actuator off | < 100 ms |
 | Session-hash reproducibility | 100% |
 | EEG entrainment lift vs fixed 40 Hz | ≥ 20% |
+
+All criteria fail closed: NaN measurements, impossible hash counts
+(`reproduced > total`), or an empty replay set grade as FAIL.
 
 ---
 

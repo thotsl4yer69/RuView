@@ -109,7 +109,11 @@ impl ContextualBandit {
     /// Build a bandit from candidate stimuli. Each candidate is **clamped into
     /// the envelope** on the way in, so no arm can ever be unsafe (ADR-250 §12).
     /// Returns `None` if no candidates were supplied.
-    pub fn new(envelope: &SafetyEnvelope, candidates: &[StimulusParameters], alpha: f64) -> Option<Self> {
+    pub fn new(
+        envelope: &SafetyEnvelope,
+        candidates: &[StimulusParameters],
+        alpha: f64,
+    ) -> Option<Self> {
         if candidates.is_empty() {
             return None;
         }

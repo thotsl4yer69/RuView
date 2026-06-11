@@ -74,6 +74,7 @@ pub mod hil;
 pub mod math;
 pub mod objective;
 pub mod optimizer;
+pub mod participant;
 pub mod program;
 pub mod proof;
 pub mod response;
@@ -137,9 +138,10 @@ mod integration_tests {
         let mut store = ProfileStore::new();
         for d in 0..3 {
             let donor_id = format!("{seed_id}-donor-{d}");
-            let mut donor =
-                RufloGovernor::enroll(&donor_id, env, &[], Consent::Granted).unwrap();
-            donor.run_calibration(&sim, &latent, &state, 5.0, 0).unwrap();
+            let mut donor = RufloGovernor::enroll(&donor_id, env, &[], Consent::Granted).unwrap();
+            donor
+                .run_calibration(&sim, &latent, &state, 5.0, 0)
+                .unwrap();
             store.upsert(donor.export_anonymized_profile());
         }
 
@@ -249,7 +251,13 @@ mod integration_tests {
         let sim = ResponseSimulator::new(77);
         let latent = LatentPerson::from_id("drift-subject");
         let calm = RuViewState::calm_baseline();
-        let mut gov = RufloGovernor::enroll("drift-subject", env, &[], Consent::Granted).unwrap();
+        // This behavioral test compresses many sessions into a tiny time window
+        // (timestamps 100..105 ms), which is incompatible with the conservative
+        // wall-clock dose/cooldown policy; use the simulation policy so the dose
+        // gate does not pre-empt the drift signal under test.
+        let mut gov = RufloGovernor::enroll("drift-subject", env, &[], Consent::Granted)
+            .unwrap()
+            .with_dose_limits(crate::participant::DoseLimits::permissive_for_simulation());
 
         // Settle in: calibration sweep (9 sessions) → stable.
         gov.run_calibration(&sim, &latent, &calm, 5.0, 0).unwrap();
@@ -264,7 +272,8 @@ mod integration_tests {
         let stim = StimulusParameters::prior();
         let mut drifted = false;
         for i in 0..6 {
-            gov.run_session(&sim, &latent, &collapsed, &stim, 100 + i).unwrap();
+            gov.run_session(&sim, &latent, &collapsed, &stim, 100 + i)
+                .unwrap();
             if gov.drift_status() == DriftStatus::Drifted {
                 drifted = true;
                 break;
@@ -308,7 +317,11 @@ mod integration_tests {
         };
         let mean = |stim: &StimulusParameters| -> f64 {
             (0..20)
-                .map(|i| sim.simulate(&latent, &state, stim, 1000 + i).eeg.gamma_power_gain)
+                .map(|i| {
+                    sim.simulate(&latent, &state, stim, 1000 + i)
+                        .eeg
+                        .gamma_power_gain
+                })
                 .sum::<f64>()
                 / 20.0
         };

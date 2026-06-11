@@ -247,3 +247,51 @@ optional EEG, constrained optimization, and auditable RuFlo workflows. The
 immediate product claim is **personalized entrainment optimization** — not
 Alzheimer's treatment. That distinction keeps the system scientifically
 credible, clinically safer, and commercially defensible.
+
+## Safety hardening (2026-06-11 review)
+
+A safety review of the `ruview-gamma` reference crate found five places where
+safety depended on *default values* rather than *construction*. The following
+invariants now hold by construction; the reference crate enforces and tests each.
+
+1. **Safety stops are control-flow events (Finding 1).** `run_session` still
+   returns the witnessed record on a stop, but `run_calibration` (and any
+   multi-session loop) inspects the record's safety outcome and **terminates the
+   sweep** on any stop — a stop in step *N* can no longer let steps *N+1…*
+   proceed. The partial calibration is preserved in the audit log.
+
+2. **Latched, persisted governor lock (Finding 2, ADR-250 §8 terminate-and-lock).**
+   An adverse-event / seizure-like / distress stop engages a **latched lock** on
+   the participant's `ParticipantSafetyState`, which is serialized into the
+   session store. A *new* governor instance for the same participant also
+   refuses (`Err(ParticipantLocked)`) until `unlock_with_acknowledgment(operator_note)`
+   is called, which itself writes an audit record. Lock-class mapping: seizure-like
+   → `SeizureLike`, abnormal distress → `Distress`, other medical adverse events
+   → `AdverseEvent`; user-stop / low-sensor-confidence / out-of-envelope stops do
+   not latch a cross-session lock (retryable / pre-empted, not adverse).
+
+3. **Compiled-in absolute envelope bounds (Finding 3).** `SafetyEnvelope` fields
+   are now private, reachable only through a validated `try_new` / `with_*`
+   constructor and `#[serde(try_from)]`, so no config — however hostile — can be
+   built outside the absolute bounds: frequency floor **≥ 30 Hz** (keeps the whole
+   envelope above the 15–25 Hz photosensitive provocative band with margin),
+   ceiling **≤ 60 Hz**, brightness/volume cap **≤ 0.6**, max session duration
+   **≤ 30 min**. This mirrors the firmware's compiled-in stance: deserialization
+   of an 18–22 Hz / brightness-1.0 / 10⁶-minute envelope fails closed.
+
+4. **Daily-dose cap + inter-session cooldown (Finding 4).** The governor enforces
+   **≤ 4 sittings per rolling 24 h** and a **≥ 60 min** inter-sitting cooldown from
+   the persisted ledger; violations return typed errors and are enforced across
+   governor instances. A calibration sweep delivered at one timestamp is **one
+   sitting / one dose unit** (sub-sessions do not trip the inter-step cooldown),
+   and calibration sittings are counted toward the cap — not a backdoor around it.
+
+5. **Per-tick monitor wired into the session loop (Finding 5).** `run_session`
+   now evaluates the latched `SafetyMonitor` over **every tick** of the simulated
+   session; a mid-session latch truncates the session at that tick (the recorded
+   delivered stimulus duration is reduced to the completed fraction). A clean
+   session is byte-identical to the prior single-summary path, so the pinned
+   deterministic proof witness is unchanged.
+
+   *Minor:* `seed_from_cohort` enforces a privacy k-floor (**≥ 3 distinct cohort
+   profiles**) before consuming cohort priors.

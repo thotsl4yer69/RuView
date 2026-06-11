@@ -97,18 +97,18 @@ impl SafeEntrainmentObjective {
     /// plus a duration term. Penalizes pushing brightness/volume toward the
     /// envelope edges and running long sessions before tolerance is shown.
     pub fn overstimulation_penalty(&self, s: &StimulusParameters) -> f64 {
-        let b = if self.envelope.brightness_cap > 0.0 {
-            s.brightness_level / self.envelope.brightness_cap
+        let b = if self.envelope.brightness_cap() > 0.0 {
+            s.brightness_level / self.envelope.brightness_cap()
         } else {
             0.0
         };
-        let v = if self.envelope.volume_cap > 0.0 {
-            s.volume_level / self.envelope.volume_cap
+        let v = if self.envelope.volume_cap() > 0.0 {
+            s.volume_level / self.envelope.volume_cap()
         } else {
             0.0
         };
-        let d = if self.envelope.max_duration_minutes > 0.0 {
-            s.duration_minutes / self.envelope.max_duration_minutes
+        let d = if self.envelope.max_duration_minutes() > 0.0 {
+            s.duration_minutes / self.envelope.max_duration_minutes()
         } else {
             0.0
         };

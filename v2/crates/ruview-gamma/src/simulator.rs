@@ -15,6 +15,7 @@ use rand_chacha::ChaCha20Rng;
 use sha2::{Digest, Sha256};
 
 use crate::response::{EegMeasurement, RuViewState, SleepState};
+use crate::safety::AdverseEvent;
 use crate::stimulus::StimulusParameters;
 
 /// A person's hidden response physiology. Real people are not 40 Hz-identical;
@@ -43,11 +44,11 @@ impl LatentPerson {
         // Map hash bytes to parameter ranges.
         let u = |i: usize| (h[i] as f64) / 255.0;
         Self {
-            peak_hz: 37.0 + u(0) * 6.0,             // 37..43 Hz
-            width_hz: 1.5 + u(1) * 2.5,             // 1.5..4.0 Hz
-            max_gain: 0.45 + u(2) * 0.45,           // 0.45..0.90
+            peak_hz: 37.0 + u(0) * 6.0,              // 37..43 Hz
+            width_hz: 1.5 + u(1) * 2.5,              // 1.5..4.0 Hz
+            max_gain: 0.45 + u(2) * 0.45,            // 0.45..0.90
             intensity_sensitivity: 0.2 + u(3) * 0.6, // 0.2..0.8
-            noise: 0.02 + u(4) * 0.08,              // 0.02..0.10
+            noise: 0.02 + u(4) * 0.08,               // 0.02..0.10
         }
     }
 }
@@ -65,15 +66,101 @@ pub struct SimulatedResponse {
     pub adverse_event: bool,
 }
 
+/// A deterministic safety-fault injection (Finding 5, 2026-06-11 review). The
+/// synthetic simulator is the M1 validation harness; real adverse events arrive
+/// from hardware/clinic. Under the absolute intensity caps (≤ 0.6) the organic
+/// overstimulation path can no longer reach the adverse threshold, so this
+/// scheduled injection is how the integrated per-tick monitor + terminate-and-
+/// lock path is exercised in simulation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaultSchedule {
+    /// Session index at which the fault surfaces.
+    pub at_session_index: u64,
+    /// Tick (0-based, ≈ minutes) within that session at which it surfaces.
+    pub at_tick: usize,
+    /// What surfaces.
+    pub fault: InjectedFault,
+}
+
+/// The kind of safety fault a [`FaultSchedule`] surfaces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InjectedFault {
+    /// Surface an adverse event at the scheduled tick (engages terminate-and-lock
+    /// if its class warrants it).
+    Adverse(AdverseEvent),
+    /// Drop sensor confidence to this value at the scheduled tick.
+    LowConfidence(f64),
+}
+
+/// One per-tick safety sample the in-session monitor evaluates (Finding 5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SafetySample {
+    /// Adverse event surfaced at this tick, if any.
+    pub adverse: Option<AdverseEvent>,
+    /// Sensor confidence at this tick `[0,1]`.
+    pub sensor_confidence: f64,
+}
+
 /// Deterministic response simulator.
 #[derive(Debug, Clone)]
 pub struct ResponseSimulator {
     seed: u64,
+    /// Optional deterministic fault injection for the per-tick safety path.
+    fault: Option<FaultSchedule>,
 }
 
 impl ResponseSimulator {
     pub fn new(seed: u64) -> Self {
-        Self { seed }
+        Self { seed, fault: None }
+    }
+
+    /// A simulator that surfaces a scheduled safety fault, for validating the
+    /// integrated per-tick monitor + terminate-and-lock path (Finding 5).
+    pub fn with_fault(seed: u64, fault: FaultSchedule) -> Self {
+        Self {
+            seed,
+            fault: Some(fault),
+        }
+    }
+
+    /// Per-tick safety samples for one session (Finding 5). One tick ≈ one
+    /// minute of the planned duration (≥ 1). Normal sessions yield clean
+    /// samples — the aggregate [`simulate`](Self::simulate) cannot produce an
+    /// adverse event inside the absolute caps — so the witness of a clean
+    /// session is unchanged; a configured [`FaultSchedule`] surfaces a
+    /// deterministic event at its tick.
+    pub fn session_ticks(
+        &self,
+        person: &LatentPerson,
+        state: &RuViewState,
+        stimulus: &StimulusParameters,
+        session_index: u64,
+    ) -> Vec<SafetySample> {
+        let n = (stimulus.duration_minutes.round() as i64).clamp(1, 600) as usize;
+        // Organic adverse signal from the aggregate physics (kept wired even if
+        // it cannot fire under the absolute caps): surfaced mid-session.
+        let agg = self.simulate(person, state, stimulus, session_index);
+        let organic_tick = n / 2;
+        (0..n)
+            .map(|i| {
+                let mut sample = SafetySample {
+                    adverse: None,
+                    sensor_confidence: state.sensor_confidence,
+                };
+                if agg.adverse_event && i == organic_tick {
+                    sample.adverse = Some(AdverseEvent::AbnormalDistress);
+                }
+                if let Some(f) = &self.fault {
+                    if f.at_session_index == session_index && f.at_tick == i {
+                        match f.fault {
+                            InjectedFault::Adverse(ev) => sample.adverse = Some(ev),
+                            InjectedFault::LowConfidence(c) => sample.sensor_confidence = c,
+                        }
+                    }
+                }
+                sample
+            })
+            .collect()
     }
 
     /// Simulate a session. `session_index` makes repeated identical protocols

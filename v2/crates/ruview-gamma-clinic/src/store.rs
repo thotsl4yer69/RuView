@@ -192,9 +192,11 @@ impl ClinicStore {
     fn apply(&mut self, record: ClinicRecord) {
         match record {
             ClinicRecord::Profile(p) => self.profiles.upsert(p),
-            ClinicRecord::Session(s) => {
-                self.sessions.entry(s.profile_tag.clone()).or_default().push(s)
-            }
+            ClinicRecord::Session(s) => self
+                .sessions
+                .entry(s.profile_tag.clone())
+                .or_default()
+                .push(s),
             ClinicRecord::Acceptance(a) => {
                 self.acceptance.insert(a.program_id.clone(), a);
             }
@@ -204,17 +206,29 @@ impl ClinicStore {
     /// Append a record: chain-hash its exact serialized bytes, write the line,
     /// update memory.
     pub fn append(&mut self, record: ClinicRecord) -> Result<(), StoreError> {
-        let record_json = serde_json::to_string(&record)
-            .map_err(|e| StoreError::Corrupt { line: 0, reason: e.to_string() })?;
+        let record_json = serde_json::to_string(&record).map_err(|e| StoreError::Corrupt {
+            line: 0,
+            reason: e.to_string(),
+        })?;
         let hash = entry_hash(&self.head, &record_json);
-        let raw = serde_json::value::RawValue::from_string(record_json)
-            .map_err(|e| StoreError::Corrupt { line: 0, reason: e.to_string() })?;
+        let raw = serde_json::value::RawValue::from_string(record_json).map_err(|e| {
+            StoreError::Corrupt {
+                line: 0,
+                reason: e.to_string(),
+            }
+        })?;
         let line = serde_json::to_string(&ChainedLine {
             record: raw,
             entry_hash: hash.clone(),
         })
-        .map_err(|e| StoreError::Corrupt { line: 0, reason: e.to_string() })?;
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        .map_err(|e| StoreError::Corrupt {
+            line: 0,
+            reason: e.to_string(),
+        })?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
         self.head = hash;
@@ -227,29 +241,49 @@ impl ClinicStore {
         let file = match File::open(&self.path) {
             Ok(f) => f,
             Err(_) => {
-                return ChainStatus { valid: true, records: 0, broken_at: None };
+                return ChainStatus {
+                    valid: true,
+                    records: 0,
+                    broken_at: None,
+                };
             }
         };
         let mut prev = GENESIS.to_string();
         let mut n = 0usize;
         for (i, line) in BufReader::new(file).lines().enumerate() {
             let Ok(line) = line else {
-                return ChainStatus { valid: false, records: n, broken_at: Some(i + 1) };
+                return ChainStatus {
+                    valid: false,
+                    records: n,
+                    broken_at: Some(i + 1),
+                };
             };
             if line.trim().is_empty() {
                 continue;
             }
             let parsed: Result<ChainedLine, _> = serde_json::from_str(&line);
             let Ok(chained) = parsed else {
-                return ChainStatus { valid: false, records: n, broken_at: Some(i + 1) };
+                return ChainStatus {
+                    valid: false,
+                    records: n,
+                    broken_at: Some(i + 1),
+                };
             };
             if entry_hash(&prev, chained.record.get()) != chained.entry_hash {
-                return ChainStatus { valid: false, records: n, broken_at: Some(i + 1) };
+                return ChainStatus {
+                    valid: false,
+                    records: n,
+                    broken_at: Some(i + 1),
+                };
             }
             prev = chained.entry_hash;
             n += 1;
         }
-        ChainStatus { valid: true, records: n, broken_at: None }
+        ChainStatus {
+            valid: true,
+            records: n,
+            broken_at: None,
+        }
     }
 
     /// The RuVector layer over loaded profiles (kNN / warm-start / clustering).
@@ -329,9 +363,12 @@ mod tests {
         let (_d, path) = tmp();
         {
             let mut s = ClinicStore::open(&path).unwrap();
-            s.append(ClinicRecord::Profile(profile("tag-a", 39.0))).unwrap();
-            s.append(ClinicRecord::Session(session("tag-a", 39.0, 0.7))).unwrap();
-            s.append(ClinicRecord::Session(session("tag-a", 39.5, 0.75))).unwrap();
+            s.append(ClinicRecord::Profile(profile("tag-a", 39.0)))
+                .unwrap();
+            s.append(ClinicRecord::Session(session("tag-a", 39.0, 0.7)))
+                .unwrap();
+            s.append(ClinicRecord::Session(session("tag-a", 39.5, 0.75)))
+                .unwrap();
             s.append(ClinicRecord::Acceptance(AcceptanceSummary {
                 program_id: "sleep-optimization".into(),
                 entrainment_gain: 0.25,
@@ -358,8 +395,10 @@ mod tests {
         let (_d, path) = tmp();
         {
             let mut s = ClinicStore::open(&path).unwrap();
-            s.append(ClinicRecord::Session(session("tag-a", 40.0, 0.6))).unwrap();
-            s.append(ClinicRecord::Session(session("tag-a", 41.0, 0.7))).unwrap();
+            s.append(ClinicRecord::Session(session("tag-a", 40.0, 0.6)))
+                .unwrap();
+            s.append(ClinicRecord::Session(session("tag-a", 41.0, 0.7)))
+                .unwrap();
         }
         // Doctor the first line's score 0.6 -> 0.9 (a retroactive edit).
         let text = std::fs::read_to_string(&path).unwrap();
@@ -378,12 +417,20 @@ mod tests {
         let (_d, path) = tmp();
         {
             let mut s = ClinicStore::open(&path).unwrap();
-            s.append(ClinicRecord::Session(session("a", 40.0, 0.5))).unwrap();
-            s.append(ClinicRecord::Session(session("a", 41.0, 0.6))).unwrap();
-            s.append(ClinicRecord::Session(session("a", 42.0, 0.7))).unwrap();
+            s.append(ClinicRecord::Session(session("a", 40.0, 0.5)))
+                .unwrap();
+            s.append(ClinicRecord::Session(session("a", 41.0, 0.6)))
+                .unwrap();
+            s.append(ClinicRecord::Session(session("a", 42.0, 0.7)))
+                .unwrap();
         }
         let text = std::fs::read_to_string(&path).unwrap();
-        let pruned: Vec<&str> = text.lines().enumerate().filter(|(i, _)| *i != 1).map(|(_, l)| l).collect();
+        let pruned: Vec<&str> = text
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, l)| l)
+            .collect();
         std::fs::write(&path, pruned.join("\n")).unwrap();
         assert!(ClinicStore::open(&path).is_err());
     }
@@ -393,8 +440,10 @@ mod tests {
         let (_d, path) = tmp();
         {
             let mut s = ClinicStore::open(&path).unwrap();
-            s.append(ClinicRecord::Profile(profile("lo", 37.0))).unwrap();
-            s.append(ClinicRecord::Profile(profile("hi", 43.0))).unwrap();
+            s.append(ClinicRecord::Profile(profile("lo", 37.0)))
+                .unwrap();
+            s.append(ClinicRecord::Profile(profile("hi", 43.0)))
+                .unwrap();
         }
         let s = ClinicStore::open(&path).unwrap();
         let mut q = [0.5; VECTOR_DIM];
