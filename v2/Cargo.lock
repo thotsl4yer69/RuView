@@ -10921,6 +10921,7 @@ version = "0.3.0"
 dependencies = [
  "blake3",
  "criterion",
+ "ruvector-mincut",
  "wifi-densepose-bfld",
  "wifi-densepose-core",
  "wifi-densepose-geo 0.1.0",
