@@ -38,7 +38,8 @@ machinery on the tiny checkpoint:
 
 Usage:
   PYTHONUTF8=1 .venv/Scripts/python.exe tiny_edge_bench.py \
-      [--data-dir <preprocessed_csi_data>] [--subset 10000] [--calib 500]
+      [--data-dir <preprocessed_csi_data>] [--subset 10000] [--calib 512]
+  (--calib must be a multiple of 64; see step 4 above)
 
 Writes/merges into results/edge_optimization.json under key "tiny_variant".
 """
@@ -210,6 +211,13 @@ def main():
     parser.add_argument("--skip-accuracy", action="store_true")
     parser.add_argument("--out", default=os.path.join(RESULTS, "edge_optimization.json"))
     args = parser.parse_args()
+
+    if args.calib % 64 != 0:
+        parser.error(
+            f"--calib must be a multiple of 64 (got {args.calib}): ORT 1.26's "
+            f"histogram calibration collector np.asarray()'s the per-batch "
+            f"maxima and crashes on a ragged final batch (calibration batch "
+            f"size is 64)")
 
     model = load_tiny_model()
     info = describe(model)

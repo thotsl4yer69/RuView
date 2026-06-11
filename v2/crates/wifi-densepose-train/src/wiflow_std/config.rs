@@ -56,6 +56,10 @@ fn default_input_pw_groups() -> usize {
     1
 }
 
+fn default_min_feature_width() -> usize {
+    15
+}
+
 // ---------------------------------------------------------------------------
 // WiFlowStdConfig
 // ---------------------------------------------------------------------------
@@ -114,8 +118,27 @@ pub struct WiFlowStdConfig {
     pub attention_groups: usize,
 
     /// Number of 2-D keypoints produced. Default: **15** (upstream skeleton);
-    /// use **17** for RuView's COCO-skeleton ESP32 eval set.
+    /// use **17** for RuView's COCO-skeleton ESP32 eval set. Only changes the
+    /// parameter-free final adaptive pool — never the trunk: the stride
+    /// schedule is governed by [`Self::min_feature_width`], so 15- and
+    /// 17-keypoint variants share the identical conv graph and weights
+    /// (matching the validated Python protocol,
+    /// `benchmarks/wiflow-std/remote/measb/train_measb.py`, which swaps only
+    /// `avg_pool` and loads the pretrained state_dict `strict=True`).
     pub keypoints: usize,
+
+    /// Floor for the conv encoder's width downsampling: each
+    /// `AsymmetricConvBlock` halves the width only while the result stays
+    /// ≥ this value (see [`Self::conv_strides`]).
+    ///
+    /// Default: **15** — the upstream constant. Provenance: the reference's
+    /// four hardcoded stride-2 blocks exist because its 240-channel TCN
+    /// output halves cleanly four times, 240 / 2⁴ = 15. The compact presets'
+    /// schedules were derived with this same floor. Override only when
+    /// designing a new trunk; do **not** couple it to [`Self::keypoints`] —
+    /// the adaptive pool maps the decoder height to any keypoint count.
+    #[serde(default = "default_min_feature_width")]
+    pub min_feature_width: usize,
 
     /// Elementwise dropout probability inside the TCN blocks, in `[0, 1)`.
     /// Default: **0.5** (the value used by our verified retraining run).
@@ -134,6 +157,7 @@ impl Default for WiFlowStdConfig {
             conv_channels: vec![8, 16, 32, 64],
             attention_groups: 8,
             keypoints: 15,
+            min_feature_width: 15,
             dropout: 0.5,
         }
     }
@@ -142,6 +166,12 @@ impl Default for WiFlowStdConfig {
 impl WiFlowStdConfig {
     /// Default architecture with a different keypoint count (e.g. 17 for the
     /// ESP32 COCO-skeleton eval set, ADR-152 §2.2(b)).
+    ///
+    /// The trunk is untouched: [`Self::min_feature_width`] stays at the
+    /// upstream floor of 15, so e.g. `for_keypoints(17)` keeps the trained
+    /// `[2, 2, 2, 2]` stride schedule (feature width 15) and the adaptive
+    /// pool maps 15 → 17 — exactly the validated Python protocol
+    /// (`benchmarks/wiflow-std/remote/measb/train_measb.py`).
     pub fn for_keypoints(keypoints: usize) -> Self {
         WiFlowStdConfig {
             keypoints,
@@ -284,6 +314,12 @@ impl WiFlowStdConfig {
         if self.keypoints == 0 {
             return Err(ConfigError::invalid_value("keypoints", "must be >= 1"));
         }
+        if self.min_feature_width == 0 {
+            return Err(ConfigError::invalid_value(
+                "min_feature_width",
+                "must be >= 1",
+            ));
+        }
         if !self.dropout.is_finite() || !(0.0..1.0).contains(&self.dropout) {
             return Err(ConfigError::invalid_value(
                 "dropout",
@@ -316,16 +352,20 @@ impl WiFlowStdConfig {
     /// Width stride of each `AsymmetricConvBlock`, derived with the sweep's
     /// rule (`model_compact.py::compute_strides`): halve the width
     /// (`w → ceil(w / 2)`, the `(1,3)`-kernel stride-2 output size) only
-    /// while the result stays ≥ [`Self::keypoints`], so the final adaptive
-    /// pool never has to duplicate rows. At the upstream default
-    /// (240 channels, 15 keypoints) this derives `[2, 2, 2, 2]` — the
-    /// hardcoded upstream schedule, exactly.
+    /// while the result stays ≥ [`Self::min_feature_width`]. At the upstream
+    /// default (240 TCN channels, floor 15) this derives `[2, 2, 2, 2]` —
+    /// the hardcoded upstream schedule, exactly.
+    ///
+    /// Deliberately independent of [`Self::keypoints`]: the keypoint count
+    /// only changes the parameter-free adaptive pool, so retargeting the
+    /// skeleton (e.g. [`Self::for_keypoints`]`(17)`) keeps the trained graph
+    /// and the pool maps `feature_width() → keypoints`.
     pub fn conv_strides(&self) -> Vec<usize> {
         let mut w = self.tcn_output_channels();
         let mut strides = Vec::with_capacity(self.conv_channels.len());
         for _ in &self.conv_channels {
             let next = w.div_ceil(2);
-            if next >= self.keypoints {
+            if next >= self.min_feature_width {
                 strides.push(2);
                 w = next;
             } else {
@@ -375,7 +415,16 @@ impl WiFlowStdConfig {
     ///
     /// Pins the port against the verified reference: the 15-keypoint default
     /// must equal **2,225,042** (`RESULTS.md` artifact verification).
+    ///
+    /// Returns **0** for any config that fails [`Self::validate`]: the
+    /// formula is only meaningful for buildable architectures (an invalid
+    /// config would otherwise index an empty `conv_channels` or divide by a
+    /// zero group count). Call `validate()` first when you need the reason.
     pub fn param_count(&self) -> usize {
+        if self.validate().is_err() {
+            return 0;
+        }
+
         let mut total = 0;
 
         // TCN stack: per-conv groups follow tcn_groups_mode; only the first
@@ -591,6 +640,76 @@ mod tests {
         assert_eq!(WiFlowStdConfig::half().feature_width(), 15);
         assert_eq!(WiFlowStdConfig::quarter().feature_width(), 15);
         assert_eq!(WiFlowStdConfig::tiny().feature_width(), 16);
+    }
+
+    #[test]
+    fn for_keypoints_17_keeps_trained_trunk_and_pools_15_to_17() {
+        // Pin against the validated Python protocol (train_measb.py): K=17
+        // swaps only the adaptive pool, never the stride schedule. A derived
+        // [2, 2, 2, 1]/width-30 graph here would silently diverge from the
+        // trained [2, 2, 2, 2]/width-15 checkpoint.
+        let cfg = WiFlowStdConfig::for_keypoints(17);
+        assert_eq!(cfg.min_feature_width, 15);
+        assert_eq!(cfg.conv_strides(), [2, 2, 2, 2]);
+        assert_eq!(cfg.feature_width(), 15);
+        assert_eq!(cfg.output_shape(1), (1, 17, 2));
+    }
+
+    #[test]
+    fn min_feature_width_override_changes_schedule_as_designed() {
+        // Raising the floor stops the downsampling earlier (240 → 30).
+        let cfg = WiFlowStdConfig {
+            min_feature_width: 30,
+            ..Default::default()
+        };
+        cfg.validate().expect("floor 30 validates");
+        assert_eq!(cfg.conv_strides(), [2, 2, 2, 1]);
+        assert_eq!(cfg.feature_width(), 30);
+
+        // Lowering it lets a small trunk halve further (tiny: 32 → 8).
+        let cfg = WiFlowStdConfig {
+            min_feature_width: 8,
+            ..WiFlowStdConfig::tiny()
+        };
+        cfg.validate().expect("floor 8 validates");
+        assert_eq!(cfg.conv_strides(), [2, 2, 1, 1]);
+        assert_eq!(cfg.feature_width(), 8);
+    }
+
+    #[test]
+    fn rejects_zero_min_feature_width() {
+        let cfg = WiFlowStdConfig {
+            min_feature_width: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn param_count_returns_zero_for_invalid_configs() {
+        // Documented total behavior: configs that fail validate() yield 0
+        // instead of panicking (OOB index / division by zero).
+        for cfg in [
+            WiFlowStdConfig {
+                conv_channels: vec![],
+                ..Default::default()
+            },
+            WiFlowStdConfig {
+                tcn_groups: 0,
+                ..Default::default()
+            },
+            WiFlowStdConfig {
+                input_pw_groups: 0,
+                ..Default::default()
+            },
+            WiFlowStdConfig {
+                tcn_channels: vec![],
+                ..Default::default()
+            },
+        ] {
+            assert!(cfg.validate().is_err(), "precondition: {cfg:?} is invalid");
+            assert_eq!(cfg.param_count(), 0, "no panic, returns 0: {cfg:?}");
+        }
     }
 
     #[test]

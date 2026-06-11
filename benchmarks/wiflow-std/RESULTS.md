@@ -66,6 +66,19 @@ mostly would-be *training* data — so this is not a split mismatch):
    Kaggle upload. Window masks: `results/nan_windows_mask.npy`,
    `results/big_windows_mask.npy`.
 
+### Reproducing the corruption masks
+
+The two mask files (9,070 NaN/Inf windows, 9,072 with |amplitude| > 1.5;
+union 9,072, all in dataset files 487–499) are **committed ground truth**
+(gitignore-negated, ~352 KB each). They can only be regenerated from a
+**pristine** Kaggle download: `remote/clean_v2.py` repairs the dataset by
+zeroing the corrupted windows in place, after which the corruption evidence
+is gone and a rescan returns all-False. `generate_corruption_masks.py`
+re-derives them (chunked scan, criteria: any non-finite value OR
+max |finite| > 1.5 per 540×20 window) and refuses to write all-False masks,
+which indicate a cleaned copy. Verified 2026-06-11: a regeneration from the
+local pristine download is bit-identical to the committed masks.
+
 ### Retraining result (MEASURED, 2026-06-10): claims APPROXIMATELY REPRODUCED
 
 Since the shipped checkpoint is unusable, measurement (a) fell back to retraining

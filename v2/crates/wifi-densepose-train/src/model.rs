@@ -126,7 +126,15 @@ impl WiFiDensePoseModel {
         tch::no_grad(|| self.forward_impl(amplitude, phase, false))
     }
 
-    /// Save model weights to a file (tch safetensors / .pt format).
+    /// Save model weights to a file. The tch `VarStore` dispatches the format
+    /// on the file extension: `.safetensors` → safetensors, anything else →
+    /// torch `.pt`.
+    ///
+    /// **Platform constraint:** prefer `.safetensors`. The `.pt` path
+    /// (`_save_parameters`/`_load_parameters`) is broken on Windows with
+    /// torch 2.11 (GenericDict internal assert on the load roundtrip — see
+    /// `wiflow_std/model.rs::save_and_load_roundtrip`), which is why
+    /// [`crate::trainer::Trainer`] writes `.safetensors` checkpoints.
     ///
     /// # Errors
     ///
@@ -137,7 +145,8 @@ impl WiFiDensePoseModel {
             .map_err(|e| TrainError::training_step(format!("save failed: {e}")))
     }
 
-    /// Load model weights from a file.
+    /// Load model weights from a file (format dispatched on extension; see
+    /// the `.pt`-on-Windows caveat on [`Self::save`]).
     ///
     /// # Errors
     ///
@@ -983,7 +992,9 @@ mod tests {
         let mut model = WiFiDensePoseModel::new(&cfg, Device::Cpu);
 
         let tmp = tempdir().expect("tempdir");
-        let path = tmp.path().join("weights.pt");
+        // safetensors, not .pt: this torch build's .pt roundtrip is broken on
+        // Windows (torch 2.11 GenericDict internal assert).
+        let path = tmp.path().join("weights.safetensors");
 
         model.save(&path).expect("save should succeed");
         model.load(&path).expect("load should succeed");

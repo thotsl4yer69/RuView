@@ -12,103 +12,38 @@
 //! (responder responds with a rejected setup status), setup-ID collision
 //! ([`super::table::SessionTable`]), and negotiation timeout (typed
 //! [`BfError::NegotiationTimeout`] + reset to Idle).
+//!
+//! **Single-role design:** a session is constructed as initiator or responder
+//! and keeps that role for its whole lifetime. An initiator-role session
+//! receiving a peer's setup or SBP request answers `RejectedNotSupported`
+//! instead of accepting — a peer must never be able to hijack a session out
+//! of its configured role. Endpoints that play both roles run one session per
+//! role (or a [`super::table::SessionTable`] for the responder side).
+//!
+//! **SBP proxy mode:** a responder session that accepts an SBP request
+//! becomes a first-class proxy ([`SensingSession::is_sbp_proxy`]): it drives
+//! the standard initiator path toward the actual sensing responder —
+//! including re-triggering measurement instances on
+//! [`SessionEvent::InstanceElapsed`] — and relays every received report to
+//! the SBP client via [`Action::RelaySbpReport`], in addition to local
+//! [`Action::DeliverReport`] delivery.
+//!
+//! Local `Start*` commands issued outside Idle are caller bugs and surface
+//! as typed [`BfError::InvalidStateForCommand`]; genuinely ignorable stray
+//! frames/ticks remain silent no-ops. The FSM I/O types live in
+//! [`super::events`] and are re-exported here.
 
 use super::messages::{
-    CsiReportPayload, SbpRequest, SbpResponse, SbpStatus, SensingMeasurementInstance,
-    SensingMeasurementReport, SensingMeasurementSetupRequest, SensingMeasurementSetupResponse,
-    SensingSessionTermination, TerminationReason,
+    SbpRequest, SbpResponse, SbpStatus, SensingMeasurementInstance, SensingMeasurementReport,
+    SensingMeasurementSetupRequest, SensingMeasurementSetupResponse, SensingSessionTermination,
+    TerminationReason,
 };
 use super::types::{
     BfError, MeasurementInstanceId, MeasurementSetupId, MeasurementSetupParams, ReportingConfig,
-    SensingCapabilities, SensingRole, SetupStatus, SpecProfile,
+    SensingRole, SetupStatus,
 };
 
-/// Session FSM states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionState {
-    Idle,
-    SetupNegotiating,
-    Active,
-    Terminating,
-}
-
-/// Inputs to the session FSM. `Start*` are local commands; `*Received` are
-/// frames from the peer; `Timeout`/`InstanceElapsed` are scheduler ticks.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SessionEvent {
-    /// Local command (initiator): begin setup negotiation.
-    StartSetup(SensingMeasurementSetupRequest),
-    /// Local command (initiator): request sensing-by-proxy from an AP.
-    StartSbp(SbpRequest),
-    SetupRequestReceived(SensingMeasurementSetupRequest),
-    SetupResponseReceived(SensingMeasurementSetupResponse),
-    SbpRequestReceived(SbpRequest),
-    SbpResponseReceived(SbpResponse),
-    /// Scheduler tick: the negotiated periodicity elapsed (initiator emits
-    /// the next measurement-instance trigger).
-    InstanceElapsed,
-    /// A sensing receiver captured a measurement for an instance (payload is
-    /// fed by the transport/bridge — see `OpportunisticCsiBridge`).
-    MeasurementCaptured {
-        instance_id: MeasurementInstanceId,
-        payload: CsiReportPayload,
-    },
-    ReportReceived(SensingMeasurementReport),
-    /// Generic timeout tick for the current state.
-    Timeout,
-    /// Local command: terminate the session.
-    Terminate(TerminationReason),
-    TerminationReceived(SensingSessionTermination),
-}
-
-/// Outputs of the session FSM. `Send*`/`TriggerInstance` go to the transport;
-/// `DeliverReport`/`SessionClosed` go to the local consumer.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    SendSetupRequest(SensingMeasurementSetupRequest),
-    SendSetupResponse(SensingMeasurementSetupResponse),
-    SendSbpRequest(SbpRequest),
-    SendSbpResponse(SbpResponse),
-    TriggerInstance(SensingMeasurementInstance),
-    SendReport(SensingMeasurementReport),
-    DeliverReport(SensingMeasurementReport),
-    SendTermination(SensingSessionTermination),
-    SessionClosed(CloseReason),
-}
-
-/// Why a session returned to Idle.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CloseReason {
-    SetupRejected(SetupStatus),
-    SbpRejected(SbpStatus),
-    Terminated(TerminationReason),
-    /// Terminating-state quiescence completed (no peer echo required).
-    Completed,
-}
-
-/// Static configuration for a sensing session.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionConfig {
-    /// Spec profile this endpoint advertises/accepts.
-    pub profile: SpecProfile,
-    /// Capability set used to evaluate inbound setups.
-    pub capabilities: SensingCapabilities,
-    /// Consecutive negotiation timeouts before aborting to Idle.
-    pub max_setup_timeouts: u8,
-    /// Consecutive missed instances (Active timeouts) before terminating.
-    pub max_missed_instances: u8,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            profile: SpecProfile::Ieee80211Bf2025,
-            capabilities: SensingCapabilities::sim_full(),
-            max_setup_timeouts: 3,
-            max_missed_instances: 5,
-        }
-    }
-}
+pub use super::events::{Action, CloseReason, SessionConfig, SessionEvent, SessionState};
 
 /// One sensing session (one measurement setup) on one endpoint.
 #[derive(Debug, Clone)]
@@ -122,6 +57,10 @@ pub struct SensingSession {
     setup: Option<(MeasurementSetupId, MeasurementSetupParams)>,
     /// True when this session awaits proxied sensing (SBP client).
     sbp_client: bool,
+    /// True when this responder-role session proxies sensing for an SBP
+    /// client: it drives the initiator path toward the sensing responder
+    /// and relays received reports back to the client.
+    sbp_proxy: bool,
     setup_timeouts: u8,
     missed_instances: u8,
     instance_counter: u32,
@@ -146,6 +85,7 @@ impl SensingSession {
             pending_request: None,
             setup: None,
             sbp_client: false,
+            sbp_proxy: false,
             setup_timeouts: 0,
             missed_instances: 0,
             instance_counter: 0,
@@ -161,13 +101,20 @@ impl SensingSession {
         self.role
     }
 
+    /// True when this session is acting as an SBP proxy (accepted via
+    /// [`SessionEvent::SbpRequestReceived`]); cleared on reset to Idle.
+    pub fn is_sbp_proxy(&self) -> bool {
+        self.sbp_proxy
+    }
+
     pub fn setup_id(&self) -> Option<MeasurementSetupId> {
         self.setup.as_ref().map(|(id, _)| *id)
     }
 
     /// Drive the FSM with one event. Protocol-level rejections surface as
-    /// `Ok` actions (responses to the peer); malformed/adversarial input and
-    /// negotiation timeout surface as typed `Err` (never a panic).
+    /// `Ok` actions (responses to the peer); malformed/adversarial input,
+    /// out-of-state local commands, and negotiation timeout surface as typed
+    /// `Err` (never a panic).
     pub fn handle(&mut self, event: SessionEvent) -> Result<Vec<Action>, BfError> {
         match self.state {
             SessionState::Idle => self.handle_idle(event),
@@ -212,6 +159,13 @@ impl SensingSession {
                         status,
                     })
                 };
+                // Single-role design (module docs): an initiator-role
+                // session never accepts a peer's setup request — accepting
+                // here would let a peer hijack the session into the
+                // responder path.
+                if self.role != SensingRole::Responder {
+                    return Ok(vec![response(SetupStatus::RejectedNotSupported)]);
+                }
                 match self.evaluate_setup(&req) {
                     SetupStatus::Accepted => {
                         self.setup = Some((req.setup_id, req.params.clone()));
@@ -223,7 +177,16 @@ impl SensingSession {
                     status => Ok(vec![response(status)]),
                 }
             }
-            SessionEvent::SbpRequestReceived(sbp) => Ok(self.handle_sbp_request(sbp)),
+            SessionEvent::SbpRequestReceived(sbp) => {
+                // Single-role design: only responder-role sessions proxy.
+                if self.role != SensingRole::Responder {
+                    return Ok(vec![Action::SendSbpResponse(SbpResponse {
+                        proxy_setup_id: sbp.proxy_setup_id,
+                        status: SbpStatus::RejectedNotSupported,
+                    })]);
+                }
+                Ok(self.handle_sbp_request(sbp))
+            }
             // Stray frames/ticks in Idle are ignored, not errors.
             _ => Ok(vec![]),
         }
@@ -232,6 +195,12 @@ impl SensingSession {
     /// SBP proxy path: accept the request, then run the *standard initiator
     /// path* toward the actual sensing responder. No direct sensor coupling —
     /// the proxied setup is an ordinary `SendSetupRequest` on the transport.
+    ///
+    /// Validation is the single [`Self::evaluate_setup`] chain: the proxied
+    /// setup request is built first and evaluated exactly as a direct setup
+    /// would be, with the resulting [`SetupStatus`] mapped 1:1 onto
+    /// [`SbpStatus`] — no SBP-only re-implementation that could drift from
+    /// (or bypass) the setup policy.
     fn handle_sbp_request(&mut self, sbp: SbpRequest) -> Vec<Action> {
         let respond = |status| {
             Action::SendSbpResponse(SbpResponse {
@@ -239,29 +208,22 @@ impl SensingSession {
                 status,
             })
         };
+        // SBP-specific capability gate; everything else is the setup chain.
         if !self.config.capabilities.sensing_by_proxy {
             return vec![respond(SbpStatus::RejectedNotSupported)];
-        }
-        if !self.config.profile.accepts(&sbp.profile) {
-            return vec![respond(SbpStatus::RejectedUnsupportedParams)];
-        }
-        match sbp.validate() {
-            Err(BfError::SensingDisabledByPolicy) => {
-                return vec![respond(SbpStatus::RejectedByPolicy)];
-            }
-            Err(_) => return vec![respond(SbpStatus::RejectedUnsupportedParams)],
-            Ok(()) => {}
-        }
-        if self.config.capabilities.evaluate(&sbp.params).is_err() {
-            return vec![respond(SbpStatus::RejectedUnsupportedParams)];
         }
         let req = SensingMeasurementSetupRequest {
             profile: sbp.profile.clone(),
             setup_id: sbp.proxy_setup_id,
             params: sbp.params.clone(),
         };
+        match self.evaluate_setup(&req) {
+            SetupStatus::Accepted => {}
+            status => return vec![respond(SbpStatus::from(status))],
+        }
         self.setup = Some((req.setup_id, req.params.clone()));
         self.pending_request = Some(req.clone());
+        self.sbp_proxy = true;
         self.setup_timeouts = 0;
         self.state = SessionState::SetupNegotiating;
         vec![respond(SbpStatus::Accepted), Action::SendSetupRequest(req)]
@@ -362,6 +324,13 @@ impl SensingSession {
                     term.reason,
                 ))])
             }
+            // Local Start* outside Idle is a caller bug — typed error.
+            SessionEvent::StartSetup(_) | SessionEvent::StartSbp(_) => {
+                Err(BfError::InvalidStateForCommand {
+                    state: "SetupNegotiating",
+                })
+            }
+            // Genuinely ignorable stray frames/ticks are no-ops.
             _ => Ok(vec![]),
         }
     }
@@ -369,7 +338,13 @@ impl SensingSession {
     fn handle_active(&mut self, event: SessionEvent) -> Result<Vec<Action>, BfError> {
         match event {
             SessionEvent::InstanceElapsed => {
-                if self.role == SensingRole::Initiator && !self.sbp_client {
+                // The measurement-driving endpoint re-triggers here: the
+                // initiator, or an SBP proxy running the initiator path
+                // toward the sensing responder. SBP *clients* only consume
+                // proxied reports and never trigger instances.
+                let drives_instances =
+                    (self.role == SensingRole::Initiator || self.sbp_proxy) && !self.sbp_client;
+                if drives_instances {
                     match self.next_instance_record() {
                         Some(instance) => Ok(vec![Action::TriggerInstance(instance)]),
                         None => Ok(vec![]),
@@ -387,6 +362,11 @@ impl SensingSession {
                     Some((id, p)) => (*id, p.clone()),
                     None => return Ok(vec![]),
                 };
+                // A successful capture means this instance was not missed —
+                // the missed-instance budget counts *consecutive* misses,
+                // so it resets here even when threshold-based reporting
+                // suppresses the report below.
+                self.missed_instances = 0;
                 let mean = payload.mean_amplitude();
                 let should_report = match params.reporting {
                     ReportingConfig::EveryInstance => true,
@@ -418,7 +398,16 @@ impl SensingSession {
                     });
                 }
                 self.missed_instances = 0;
-                Ok(vec![Action::DeliverReport(report)])
+                if self.sbp_proxy {
+                    // Proxy mode: deliver to the local consumer *and* relay
+                    // toward the SBP client on the transport.
+                    Ok(vec![
+                        Action::DeliverReport(report.clone()),
+                        Action::RelaySbpReport(report),
+                    ])
+                } else {
+                    Ok(vec![Action::DeliverReport(report)])
+                }
             }
             SessionEvent::Timeout => {
                 self.missed_instances = self.missed_instances.saturating_add(1);
@@ -439,6 +428,12 @@ impl SensingSession {
                     term.reason,
                 ))])
             }
+            // Local Start* outside Idle is a caller bug — typed error.
+            SessionEvent::StartSetup(_) | SessionEvent::StartSbp(_) => {
+                Err(BfError::InvalidStateForCommand { state: "Active" })
+            }
+            // Genuinely ignorable stray frames (duplicate setup/SBP traffic)
+            // are no-ops.
             _ => Ok(vec![]),
         }
     }
@@ -455,6 +450,12 @@ impl SensingSession {
             SessionEvent::Timeout => {
                 self.reset();
                 Ok(vec![Action::SessionClosed(CloseReason::Completed)])
+            }
+            // Local Start* outside Idle is a caller bug — typed error.
+            SessionEvent::StartSetup(_) | SessionEvent::StartSbp(_) => {
+                Err(BfError::InvalidStateForCommand {
+                    state: "Terminating",
+                })
             }
             _ => Ok(vec![]),
         }
@@ -489,6 +490,7 @@ impl SensingSession {
         self.pending_request = None;
         self.setup = None;
         self.sbp_client = false;
+        self.sbp_proxy = false;
         self.setup_timeouts = 0;
         self.missed_instances = 0;
         self.instance_counter = 0;

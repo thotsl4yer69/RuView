@@ -28,7 +28,6 @@ import json
 import os
 import platform
 import statistics
-import sys
 import time
 
 import numpy as np
@@ -36,55 +35,21 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-UPSTREAM = os.path.join(HERE, "upstream")
-RESULTS = os.path.join(HERE, "results")
-sys.path.insert(0, UPSTREAM)
+from _bench_common import HERE, RESULTS, evaluate, import_upstream, load_wiflow_model
 
-# Upstream models/__init__.py is broken as published (imports a name tcn.py
-# does not define); register a stub package so it never executes.
-import types  # noqa: E402
+import_upstream()  # sys.path + models stub + >1GB np.load mmap patch
 
-_models_pkg = types.ModuleType("models")
-_models_pkg.__path__ = [os.path.join(UPSTREAM, "models")]
-sys.modules["models"] = _models_pkg
-
-import dataset as upstream_dataset  # noqa: E402
 from dataset import (  # noqa: E402
     PreprocessedCSIKeypointsDataset,
     create_preprocessed_train_val_test_loaders,
 )
-from models.pose_model import WiFlowPoseModel  # noqa: E402
-from utils.metrics import calculate_mpjpe, calculate_pck  # noqa: E402
 
 CHECKPOINT = os.path.join(RESULTS, "retrained_best_pose_model.pth")
 
-# csi_windows.npy is ~13 GB; mmap large arrays instead of loading into RAM
-# (same trick as eval_repro.py).
-_np_load = np.load
-
-
-def _np_load_mmap(path, *a, **kw):
-    if (isinstance(path, str) and path.endswith(".npy")
-            and os.path.getsize(path) > 1 << 30 and "mmap_mode" not in kw):
-        kw["mmap_mode"] = "r"
-    return _np_load(path, *a, **kw)
-
-
-upstream_dataset.np.load = _np_load_mmap
-
 
 def load_fp32_model():
-    state = torch.load(CHECKPOINT, map_location="cpu", weights_only=True)
-    # legacy upstream names, harmless no-op on the retrained checkpoint
-    renames = {"att.": "attention.", "final_conv.": "decoder."}
-    state = {next((new + k[len(old):] for old, new in renames.items()
-                   if k.startswith(old)), k): v
-             for k, v in state.items()}
-    model = WiFlowPoseModel(dropout=0.5)
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    return model
+    # legacy upstream key remap inside is a harmless no-op on this checkpoint
+    return load_wiflow_model(CHECKPOINT)
 
 
 def state_dict_size_bytes(model, path):
@@ -136,33 +101,6 @@ def build_test_subset(data_dir, subset_size, batch_size=64):
     loader = DataLoader(subset, batch_size=batch_size, shuffle=False,
                         num_workers=0)
     return loader, len(clean)
-
-
-def evaluate(model, loader, dtype=torch.float32, label=""):
-    totals = {0.2: 0.0, 0.5: 0.0}
-    total_mpe, n = 0.0, 0
-    t0 = time.time()
-    with torch.no_grad():
-        for batch_idx, (bx, by) in enumerate(loader):
-            out = model(bx.to(dtype)).float()
-            pck = calculate_pck(out, by, thresholds=[0.2, 0.5])
-            mpe = calculate_mpjpe(out, by)
-            bs = by.size(0)
-            total_mpe += mpe * bs
-            for t in totals:
-                totals[t] += pck[t] * bs
-            n += bs
-            if batch_idx % 50 == 0:
-                print(f"  [{label}] batch {batch_idx}: n={n} "
-                      f"pck20={totals[0.2]/n:.4f} mpjpe={total_mpe/n:.4f} "
-                      f"({time.time()-t0:.0f}s)", flush=True)
-    return {
-        "samples": n,
-        "pck@20": totals[0.2] / n,
-        "pck@50": totals[0.5] / n,
-        "mpjpe": total_mpe / n,
-        "wall_seconds": time.time() - t0,
-    }
 
 
 def quantize_int8_dynamic(fp32_model):
@@ -272,7 +210,7 @@ def main():
         for name, (model, dtype, _f) in variants.items():
             print(f"\n=== accuracy: {name} ===")
             results["variants"][name]["accuracy"] = evaluate(
-                model, loader, dtype, label=name)
+                model, loader, dtype=dtype, label=name)
             print(json.dumps(results["variants"][name]["accuracy"], indent=2))
 
     # ---- merge into edge_optimization.json ---------------------------------

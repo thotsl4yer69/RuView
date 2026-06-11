@@ -17,6 +17,11 @@ Usage:
   nohup venv/bin/python sweep/run_sweep.py > sweep/sweep.log 2>&1 &
 
 Idempotent: variants already present in sweep/results.jsonl are skipped.
+
+NOTE: deployed to ruvultra (~/wiflow-std-bench/sweep) as a standalone file, so
+it deliberately inlines its helpers. The reference implementations (upstream
+import shim, >1GB np.load mmap patch, key-remap loader, canonical evaluate
+loop) live in benchmarks/wiflow-std/_bench_common.py — keep copies in sync.
 """
 import argparse
 import copy
@@ -29,6 +34,20 @@ import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
+
+# csi_windows.npy is ~13 GB; mmap large arrays instead of eagerly loading
+# ~15 GB into RAM (same patch as _bench_common._np_load_mmap).
+_np_load = np.load
+
+
+def _np_load_mmap(path, *a, **kw):
+    if (isinstance(path, str) and path.endswith('.npy')
+            and os.path.getsize(path) > 1 << 30 and 'mmap_mode' not in kw):
+        kw['mmap_mode'] = 'r'
+    return _np_load(path, *a, **kw)
+
+
+np.load = _np_load_mmap
 
 BENCH = os.path.expanduser('~/wiflow-std-bench')
 SWEEP = os.path.join(BENCH, 'sweep')

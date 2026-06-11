@@ -17,41 +17,17 @@ import argparse
 import json
 import os
 import sys
-import time
-
-import numpy as np
-import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RESULTS = os.path.join(HERE, "results")
 sys.path.insert(0, HERE)
 
+from _bench_common import RESULTS, evaluate  # noqa: E402
 from quantize_bench import build_test_subset  # noqa: E402  (sets up upstream imports)
-
-sys.path.insert(0, os.path.join(HERE, "upstream"))
-from utils.metrics import calculate_mpjpe, calculate_pck  # noqa: E402
 
 
 def evaluate_ort(sess, loader, label):
-    inp = sess.get_inputs()[0].name
-    totals = {0.2: 0.0, 0.5: 0.0}
-    total_mpe, n = 0.0, 0
-    t0 = time.time()
-    for batch_idx, (bx, by) in enumerate(loader):
-        out = torch.from_numpy(sess.run(None, {inp: bx.numpy()})[0])
-        pck = calculate_pck(out, by, thresholds=[0.2, 0.5])
-        mpe = calculate_mpjpe(out, by)
-        bs = by.size(0)
-        total_mpe += mpe * bs
-        for t in totals:
-            totals[t] += pck[t] * bs
-        n += bs
-        if batch_idx % 50 == 0:
-            print(f"  [{label}] batch {batch_idx}: n={n} "
-                  f"pck20={totals[0.2]/n:.4f} mpjpe={total_mpe/n:.4f} "
-                  f"({time.time()-t0:.0f}s)", flush=True)
-    return {"samples": n, "pck@20": totals[0.2] / n, "pck@50": totals[0.5] / n,
-            "mpjpe": total_mpe / n, "wall_seconds": time.time() - t0}
+    """ORT-session evaluation via the canonical _bench_common.evaluate loop."""
+    return evaluate(sess, loader, label=label)
 
 
 def main():

@@ -207,19 +207,53 @@ fn mask_count_is_exact_for_default_recipe() {
     // 54 patches @ 0.80 → round(43.2) = 43 masked, 11 visible.
     let cfg = MaePretrainConfig::default();
     assert_eq!(cfg.num_masked(54), 43);
-    let mask = random_mask(54, cfg.mask_ratio, cfg.seed);
+    let mask = random_mask(54, cfg.mask_ratio, cfg.seed).unwrap();
     assert_eq!(mask.masked.len(), 43);
     assert_eq!(mask.visible.len(), 11);
 }
 
 #[test]
 fn same_seed_same_mask_different_seed_differs() {
-    let a = random_mask(100, 0.80, 7);
-    let b = random_mask(100, 0.80, 7);
+    let a = random_mask(100, 0.80, 7).unwrap();
+    let b = random_mask(100, 0.80, 7).unwrap();
     assert_eq!(a, b, "same (n, ratio, seed) must reproduce the mask");
 
-    let c = random_mask(100, 0.80, 8);
+    let c = random_mask(100, 0.80, 8).unwrap();
     assert_ne!(a.masked, c.masked, "different seeds must differ");
+}
+
+#[test]
+fn random_mask_rejects_invalid_ratios() {
+    // Error-not-silent: NaN must not silently mask 0 patches; ratios outside
+    // (0, 1) must not degenerate to all-visible / all-masked grids.
+    for ratio in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        1.0,
+        1.5,
+        0.0,
+        -0.1,
+    ] {
+        let err = random_mask(54, ratio, 42).unwrap_err();
+        assert!(
+            matches!(err, MaeError::InvalidMaskRatio { .. }),
+            "ratio {ratio} must be rejected, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn mask_window_rejects_invalid_ratio_before_masking() {
+    let cfg = MaePretrainConfig {
+        mask_ratio: f64::NAN,
+        ..MaePretrainConfig::default()
+    };
+    let buf = window(90, 54);
+    assert!(matches!(
+        cfg.mask_window(&buf, 90, 54),
+        Err(MaeError::InvalidMaskRatio { .. })
+    ));
 }
 
 proptest! {
@@ -231,7 +265,7 @@ proptest! {
         ratio in 0.01f64..0.99,
         seed in any::<u64>(),
     ) {
-        let mask = random_mask(n, ratio, seed);
+        let mask = random_mask(n, ratio, seed).unwrap();
         let expected_masked = ((ratio * n as f64).round() as usize).min(n);
         prop_assert_eq!(mask.masked.len(), expected_masked);
         prop_assert_eq!(mask.masked.len() + mask.visible.len(), n);
@@ -254,7 +288,10 @@ proptest! {
     /// Determinism by seed for arbitrary inputs.
     #[test]
     fn prop_mask_deterministic(n in 1usize..400, seed in any::<u64>()) {
-        prop_assert_eq!(random_mask(n, 0.80, seed), random_mask(n, 0.80, seed));
+        prop_assert_eq!(
+            random_mask(n, 0.80, seed).unwrap(),
+            random_mask(n, 0.80, seed).unwrap()
+        );
     }
 
     /// Round-trip identity for arbitrary divisible window/patch geometries.

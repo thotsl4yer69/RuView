@@ -41,24 +41,14 @@ Usage:
 import json
 import os
 import re
-import sys
 
 import numpy as np
 import torch
 from safetensors.torch import save_file
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-UPSTREAM = os.path.join(HERE, "upstream")
-RESULTS = os.path.join(HERE, "results")
-sys.path.insert(0, UPSTREAM)
+from _bench_common import RESULTS, import_upstream, remap_legacy_keys
 
-# Upstream models/__init__.py is broken as published (imports a name tcn.py
-# does not define); register a stub package so it never executes.
-import types  # noqa: E402
-
-_models_pkg = types.ModuleType("models")
-_models_pkg.__path__ = [os.path.join(UPSTREAM, "models")]
-sys.modules["models"] = _models_pkg
+import_upstream()  # sys.path + models stub
 
 from models.pose_model import WiFlowPoseModel  # noqa: E402
 
@@ -125,11 +115,8 @@ def main():
                 state = state[wrapper]
                 break
 
-    # Legacy upstream names predate the published code (eval_repro.py).
-    renames = {"att.": "attention.", "final_conv.": "decoder."}
-    state = {next((new + k[len(old):] for old, new in renames.items()
-                   if k.startswith(old)), k): v
-             for k, v in state.items()}
+    # Legacy upstream names predate the published code (_bench_common).
+    state = remap_legacy_keys(state)
 
     mapped = {}
     dropped = 0

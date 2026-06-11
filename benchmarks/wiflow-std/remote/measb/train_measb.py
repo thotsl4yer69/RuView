@@ -54,6 +54,11 @@ Pre-registered protocol (followed exactly):
 
 Usage (on ruvultra):
   nice -n 10 nohup ~/wiflow-std-bench/venv/bin/python train_measb.py > train_measb.log 2>&1 &
+
+NOTE: deployed to ruvultra as a standalone single file, so it deliberately
+inlines its helpers. The reference implementations (upstream import shim,
+np.load mmap patch, key-remap loader, canonical evaluate loop) live in
+benchmarks/wiflow-std/_bench_common.py — keep copies in sync.
 """
 
 import json

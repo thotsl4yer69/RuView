@@ -286,7 +286,12 @@ impl Trainer {
                     best_epoch = epoch;
                     patience_counter = 0;
 
-                    let ckpt_name = format!("best_epoch{epoch:04}_pck{val_pck:.4}.pt");
+                    // .safetensors, not .pt: VarStore dispatches the format on
+                    // the extension, and this torch build's .pt
+                    // _save_parameters/_load_parameters roundtrip is broken on
+                    // Windows (torch 2.11 GenericDict internal assert — see
+                    // wiflow_std/model.rs save_and_load_roundtrip).
+                    let ckpt_name = format!("best_epoch{epoch:04}_pck{val_pck:.4}.safetensors");
                     let ckpt_path = self.config.checkpoint_dir.join(&ckpt_name);
 
                     match self.model.save(&ckpt_path) {
@@ -339,8 +344,8 @@ impl Trainer {
             }
         }
 
-        // Save final model regardless.
-        let final_ckpt = self.config.checkpoint_dir.join("final.pt");
+        // Save final model regardless (.safetensors — see checkpoint note above).
+        let final_ckpt = self.config.checkpoint_dir.join("final.safetensors");
         if let Err(e) = self.model.save(&final_ckpt) {
             warn!("Failed to save final model: {e}");
         }
@@ -413,7 +418,8 @@ impl Trainer {
             .load(path)
             .map_err(|e| TrainError::checkpoint(e.to_string(), path))?;
 
-        // Try to parse the epoch from the filename (e.g. "best_epoch0042_pck0.7842.pt").
+        // Try to parse the epoch from the filename, extension-agnostic
+        // (e.g. "best_epoch0042_pck0.7842.safetensors").
         let epoch = path
             .file_stem()
             .and_then(|s| s.to_str())

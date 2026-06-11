@@ -125,12 +125,38 @@ impl SbpRequest {
 }
 
 /// Status carried by an SBP response.
+///
+/// Mirrors [`SetupStatus`] 1:1 (see the `From<SetupStatus>` impl): an SBP
+/// request is validated through the same chain as a direct setup, so every
+/// rejection class must survive the proxy translation.
+/// `RejectedNotSupported` additionally covers a proxy that lacks the SBP
+/// capability itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SbpStatus {
     Accepted,
     RejectedNotSupported,
     RejectedUnsupportedParams,
+    RejectedSetupIdCollision,
+    RejectedIncompatibleProfile,
     RejectedByPolicy,
+    RejectedCapacity,
+}
+
+impl From<SetupStatus> for SbpStatus {
+    /// 1:1 mapping from the direct-setup status space, keeping the SBP path
+    /// on the single `evaluate_setup` validation chain (no SBP-only policy
+    /// drift or bypass).
+    fn from(status: SetupStatus) -> Self {
+        match status {
+            SetupStatus::Accepted => SbpStatus::Accepted,
+            SetupStatus::RejectedNotSupported => SbpStatus::RejectedNotSupported,
+            SetupStatus::RejectedUnsupportedParams => SbpStatus::RejectedUnsupportedParams,
+            SetupStatus::RejectedSetupIdCollision => SbpStatus::RejectedSetupIdCollision,
+            SetupStatus::RejectedIncompatibleProfile => SbpStatus::RejectedIncompatibleProfile,
+            SetupStatus::RejectedByPolicy => SbpStatus::RejectedByPolicy,
+            SetupStatus::RejectedCapacity => SbpStatus::RejectedCapacity,
+        }
+    }
 }
 
 /// Sensing-by-Proxy (SBP) response (proxy AP → requesting STA).

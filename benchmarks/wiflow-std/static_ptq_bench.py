@@ -45,10 +45,11 @@ import numpy as np
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RESULTS = os.path.join(HERE, "results")
 sys.path.insert(0, HERE)
 
+from _bench_common import RESULTS  # noqa: E402
 # quantize_bench sets up upstream imports + the np.load mmap patch
+# (both via _bench_common.import_upstream)
 from quantize_bench import build_test_subset  # noqa: E402
 import quantize_bench as qb  # noqa: E402
 from eval_ort_accuracy import evaluate_ort  # noqa: E402

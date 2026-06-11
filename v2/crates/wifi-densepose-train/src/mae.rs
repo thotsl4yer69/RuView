@@ -160,6 +160,13 @@ impl MaePretrainConfig {
 
     /// Patchify `window` and draw the deterministic random mask in one step,
     /// using `self.seed`. See [`patchify`] and [`random_mask`].
+    ///
+    /// # Errors
+    ///
+    /// Everything [`patchify`] rejects, plus [`MaeError::InvalidMaskRatio`]
+    /// if `self.mask_ratio` is not finite or outside `(0, 1)` (the
+    /// [`Self::validate`] rule) — a NaN ratio must never silently mask zero
+    /// patches.
     pub fn mask_window(
         &self,
         window: &[f32],
@@ -167,7 +174,7 @@ impl MaePretrainConfig {
         subc: usize,
     ) -> Result<(PatchGrid, MaskIndices), MaeError> {
         let grid = patchify(window, time, subc, self)?;
-        let mask = random_mask(grid.n_patches(), self.mask_ratio, self.seed);
+        let mask = random_mask(grid.n_patches(), self.mask_ratio, self.seed)?;
         Ok((grid, mask))
     }
 }
@@ -337,8 +344,18 @@ fn unpatchify_select(grid: &PatchGrid, keep: Option<&[usize]>, fill: f32) -> Vec
 /// ([`Xorshift64`]), so the same `(n_patches, mask_ratio, seed)` triple always
 /// yields the same mask. Both index lists are sorted ascending, disjoint, and
 /// together cover `0..n_patches`.
-#[must_use]
-pub fn random_mask(n_patches: usize, mask_ratio: f64, seed: u64) -> MaskIndices {
+///
+/// # Errors
+///
+/// [`MaeError::InvalidMaskRatio`] if `mask_ratio` is not finite or outside
+/// the open interval `(0, 1)` — the same rule as
+/// [`MaePretrainConfig::validate`]. Erroring (never clamping) keeps the
+/// module's error-not-silent policy: a NaN ratio would otherwise silently
+/// mask zero patches and a ratio ≥ 1 would mask everything.
+pub fn random_mask(n_patches: usize, mask_ratio: f64, seed: u64) -> Result<MaskIndices, MaeError> {
+    if !mask_ratio.is_finite() || mask_ratio <= 0.0 || mask_ratio >= 1.0 {
+        return Err(MaeError::InvalidMaskRatio { ratio: mask_ratio });
+    }
     let n_masked = ((mask_ratio * n_patches as f64).round() as usize).min(n_patches);
     let mut order: Vec<usize> = (0..n_patches).collect();
     let mut rng = Xorshift64::new(seed);
@@ -350,7 +367,7 @@ pub fn random_mask(n_patches: usize, mask_ratio: f64, seed: u64) -> MaskIndices 
     let mut visible: Vec<usize> = order[n_masked..].to_vec();
     masked.sort_unstable();
     visible.sort_unstable();
-    MaskIndices { masked, visible }
+    Ok(MaskIndices { masked, visible })
 }
 
 // ---------------------------------------------------------------------------

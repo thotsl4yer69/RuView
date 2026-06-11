@@ -39,6 +39,10 @@ pub enum SensingFrame {
     Report(SensingMeasurementReport),
     SbpRequest(SbpRequest),
     SbpResponse(SbpResponse),
+    /// Proxied measurement report forwarded by an SBP proxy toward its SBP
+    /// client ([`Action::RelaySbpReport`]) — distinct from [`Self::Report`],
+    /// which travels toward the sensing initiator.
+    SbpReport(SensingMeasurementReport),
     Termination(SensingSessionTermination),
 }
 
@@ -106,6 +110,7 @@ pub fn action_to_frame(action: &Action) -> Option<SensingFrame> {
         Action::SendSbpResponse(resp) => Some(SensingFrame::SbpResponse(*resp)),
         Action::TriggerInstance(instance) => Some(SensingFrame::InstanceTrigger(*instance)),
         Action::SendReport(report) => Some(SensingFrame::Report(report.clone())),
+        Action::RelaySbpReport(report) => Some(SensingFrame::SbpReport(report.clone())),
         Action::SendTermination(term) => Some(SensingFrame::Termination(*term)),
         Action::DeliverReport(_) | Action::SessionClosed(_) => None,
     }
@@ -122,6 +127,9 @@ pub fn frame_to_event(frame: SensingFrame) -> Option<super::session::SessionEven
         SensingFrame::SetupRequest(req) => Some(E::SetupRequestReceived(req)),
         SensingFrame::SetupResponse(resp) => Some(E::SetupResponseReceived(resp)),
         SensingFrame::Report(report) => Some(E::ReportReceived(report)),
+        // The SBP client consumes proxied reports through the standard
+        // report path (its session is in sbp_client mode).
+        SensingFrame::SbpReport(report) => Some(E::ReportReceived(report)),
         SensingFrame::SbpRequest(req) => Some(E::SbpRequestReceived(req)),
         SensingFrame::SbpResponse(resp) => Some(E::SbpResponseReceived(resp)),
         SensingFrame::Termination(term) => Some(E::TerminationReceived(term)),

@@ -21,40 +21,22 @@ import json
 import os
 import platform
 import statistics
-import sys
 import time
 import traceback
 
 import numpy as np
 import torch
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-UPSTREAM = os.path.join(HERE, "upstream")
-RESULTS = os.path.join(HERE, "results")
-sys.path.insert(0, UPSTREAM)
+from _bench_common import RESULTS, import_upstream, load_wiflow_model
 
-import types  # noqa: E402
-
-_models_pkg = types.ModuleType("models")
-_models_pkg.__path__ = [os.path.join(UPSTREAM, "models")]
-sys.modules["models"] = _models_pkg
-
-from models.pose_model import WiFlowPoseModel  # noqa: E402
+import_upstream()  # sys.path + models stub + >1GB np.load mmap patch
 
 CHECKPOINT = os.path.join(RESULTS, "retrained_best_pose_model.pth")
 OUT_JSON = os.path.join(RESULTS, "edge_optimization.json")
 
 
 def load_fp32_model():
-    state = torch.load(CHECKPOINT, map_location="cpu", weights_only=True)
-    renames = {"att.": "attention.", "final_conv.": "decoder."}
-    state = {next((new + k[len(old):] for old, new in renames.items()
-                   if k.startswith(old)), k): v
-             for k, v in state.items()}
-    model = WiFlowPoseModel(dropout=0.5)
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    return model
+    return load_wiflow_model(CHECKPOINT)
 
 
 def try_export(model, path, batch, dynamic, opset=17):
@@ -115,6 +97,16 @@ def bench_ort(sess, batch, n_runs):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="ONNX export + onnxruntime CPU benchmark for the "
+                    "retrained WiFlow-STD checkpoint (no options; see "
+                    "module docstring). NB: the published "
+                    "retrained_fp32_dynamic.onnx came from the TorchScript "
+                    "exporter; on newer torch the dynamo attempt may succeed "
+                    "first and produce a different (external-data) artifact.")
+    parser.parse_args()
+
     import onnxruntime
     model = load_fp32_model()
     results = {

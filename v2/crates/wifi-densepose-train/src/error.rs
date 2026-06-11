@@ -436,6 +436,18 @@ pub enum MaeError {
         crop: usize,
     },
 
+    /// The mask ratio is not a finite value strictly inside `(0, 1)` — the
+    /// same rule as [`MaePretrainConfig::validate`]. A NaN ratio must never
+    /// silently mask zero patches, and ratios ≤ 0 / ≥ 1 degenerate to
+    /// all-visible / all-masked grids.
+    ///
+    /// [`MaePretrainConfig::validate`]: crate::mae::MaePretrainConfig::validate
+    #[error("Invalid mask ratio {ratio}: must be finite and strictly inside (0, 1)")]
+    InvalidMaskRatio {
+        /// The offending ratio.
+        ratio: f64,
+    },
+
     /// A NaN or ±inf CSI value was found; corrupted input must be cleaned
     /// upstream, never masked over.
     #[error("Non-finite CSI value {value} at (t={row}, sc={col})")]

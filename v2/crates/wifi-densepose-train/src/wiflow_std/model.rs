@@ -142,7 +142,16 @@ impl WiFlowStdModel {
         tch::no_grad(|| self.forward_impl(csi, false))
     }
 
-    /// Save model weights (tch `.pt` / safetensors format).
+    /// Save model weights. The tch `VarStore` dispatches the format on the
+    /// file extension: `.safetensors` → safetensors, anything else → torch
+    /// `.pt`.
+    ///
+    /// **Platform constraint:** prefer `.safetensors`. The `.pt` path
+    /// (`_save_parameters`/`_load_parameters`) is broken on Windows with
+    /// torch 2.11 (GenericDict internal assert on the load roundtrip — see
+    /// the `save_and_load_roundtrip` test below), and the verified retrained
+    /// checkpoint is shipped as key-remapped safetensors anyway
+    /// (`benchmarks/wiflow-std/export_to_safetensors.py`).
     ///
     /// # Errors
     ///
@@ -153,7 +162,8 @@ impl WiFlowStdModel {
             .map_err(|e| TrainError::training_step(format!("save failed: {e}")))
     }
 
-    /// Load model weights from a file.
+    /// Load model weights from a file (format dispatched on extension; see
+    /// the `.pt`-on-Windows caveat on [`Self::save`]).
     ///
     /// # Errors
     ///

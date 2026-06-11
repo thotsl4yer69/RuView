@@ -33,12 +33,17 @@
 //!   measurement instance, CSI-variant report, SBP exchange, termination).
 //! - [`session`] — deterministic event-driven session FSM:
 //!   `Idle → SetupNegotiating → Active → Terminating → Idle`, with explicit
-//!   rejection paths and timeout handling. No async, no clocks.
+//!   rejection paths, timeout handling, single-role enforcement, and the
+//!   first-class SBP proxy mode. No async, no clocks.
+//! - [`events`] — the FSM I/O types ([`events::SessionEvent`],
+//!   [`events::Action`], close reasons, configuration), re-exported via
+//!   [`session`].
 //! - [`table`] — responder-side setup registry (setup-ID collision and
-//!   capacity rejection paths).
+//!   capacity rejection paths, for direct setups and SBP alike).
 //! - [`transport`] — the [`transport::SensingTransport`] seam, the
 //!   [`transport::SimTransport`] test double, and the ESP32 bridge.
 
+pub mod events;
 pub mod messages;
 pub mod session;
 pub mod table;
@@ -67,5 +72,7 @@ pub use types::{
 mod tests;
 #[cfg(test)]
 mod tests_fsm;
+#[cfg(test)]
+mod tests_sbp;
 #[cfg(test)]
 mod testutil;

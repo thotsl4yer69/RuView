@@ -386,6 +386,10 @@ impl SensingCapabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SetupStatus {
     Accepted,
+    /// The receiving endpoint does not act as a sensing responder for this
+    /// request — e.g. an initiator-role session received a setup request
+    /// (single-role design, see [`crate::ieee80211bf::session`]).
+    RejectedNotSupported,
     RejectedUnsupportedParams,
     RejectedSetupIdCollision,
     RejectedIncompatibleProfile,

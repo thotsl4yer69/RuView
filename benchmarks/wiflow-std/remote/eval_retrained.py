@@ -3,12 +3,31 @@
 Scores the model produced by run.py (train_output/best_pose_model.pth or similar)
 on the seed-42 test split: full test set AND NaN-free subset (excluding windows
 that were zero-filled by clean_nan.py — file indices 487-499).
+
+NOTE: deployed to ruvultra (~/wiflow-std-bench) as a standalone single file,
+so it deliberately inlines its helpers. The reference implementations (upstream
+import shim, >1GB np.load mmap patch, key-remap loader, canonical evaluate
+loop) live in benchmarks/wiflow-std/_bench_common.py — keep copies in sync.
 """
 import json, os, random, sys
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
+
+# csi_windows.npy is ~13 GB; mmap large arrays instead of eagerly loading
+# ~15 GB into RAM (same patch as _bench_common._np_load_mmap).
+_np_load = np.load
+
+
+def _np_load_mmap(path, *a, **kw):
+    if (isinstance(path, str) and path.endswith('.npy')
+            and os.path.getsize(path) > 1 << 30 and 'mmap_mode' not in kw):
+        kw['mmap_mode'] = 'r'
+    return _np_load(path, *a, **kw)
+
+
+np.load = _np_load_mmap
 
 sys.path.insert(0, os.path.expanduser('~/wiflow-std-bench/upstream'))
 from dataset import PreprocessedCSIKeypointsDataset, create_preprocessed_train_val_test_loaders

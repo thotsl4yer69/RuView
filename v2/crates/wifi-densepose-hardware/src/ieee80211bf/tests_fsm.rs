@@ -1,7 +1,8 @@
 //! ADR-153 acceptance tests — session FSM full cycle, rejection paths,
-//! timeout handling, threshold-based reporting, SBP flows, and adversarial
-//! no-panic coverage. Type/serde/transport/bridge tests live in
-//! [`super::tests`]. All tests are hardware-free (simulation only).
+//! timeout handling, threshold-based reporting, single-role enforcement,
+//! and adversarial no-panic coverage. SBP flows live in [`super::tests_sbp`];
+//! type/serde/transport/bridge tests in [`super::tests`]. All tests are
+//! hardware-free (simulation only).
 
 use super::messages::*;
 use super::session::{
@@ -300,77 +301,72 @@ fn threshold_report_emitted_only_when_threshold_crossed() {
     assert!(responder.handle(capture(125.0)).unwrap().is_empty());
 }
 
-// ---------- SBP ----------
+// ---------- consecutive missed-instance semantics ----------
 
 #[test]
-fn sbp_proxy_request_maps_to_standard_responder_path() {
-    // Proxy AP: accepts the SBP request and initiates an ordinary setup
-    // toward the sensing responder — no direct sensor coupling.
-    let mut proxy = SensingSession::new_responder(SessionConfig::default());
-    let sbp = SbpRequest {
-        profile: SpecProfile::Ieee80211Bf2025,
-        proxy_setup_id: MeasurementSetupId::new(11).unwrap(),
-        params: params(),
+fn missed_instance_budget_is_consecutive_not_cumulative() {
+    // Review finding 2: a successful measurement must reset the
+    // missed-instance counter — `max_missed_instances` bounds *consecutive*
+    // misses (as documented on SessionConfig), not cumulative ones.
+    let mut responder = SensingSession::new_responder(SessionConfig::default()); // 5 missed max
+    responder
+        .handle(SessionEvent::SetupRequestReceived(setup_request(2)))
+        .unwrap();
+    assert_eq!(responder.state(), SessionState::Active);
+    let capture = || SessionEvent::MeasurementCaptured {
+        instance_id: MeasurementInstanceId::new(0),
+        payload: payload(10.0),
     };
-    let actions = proxy.handle(SessionEvent::SbpRequestReceived(sbp)).unwrap();
-    let forwarded = match &actions[..] {
-        [Action::SendSbpResponse(SbpResponse {
-            status: SbpStatus::Accepted,
-            ..
-        }), Action::SendSetupRequest(req)] => req.clone(),
-        other => panic!("expected SBP accept + setup request, got {other:?}"),
-    };
-    assert_eq!(proxy.state(), SessionState::SetupNegotiating);
-    assert_eq!(forwarded.setup_id.value(), 11);
 
-    // The forwarded request drives a *normal* responder session.
-    let mut responder = SensingSession::new_responder(SessionConfig::default());
-    let actions = responder
-        .handle(SessionEvent::SetupRequestReceived(forwarded))
-        .unwrap();
-    let resp = match &actions[..] {
-        [Action::SendSetupResponse(r)] => *r,
-        other => panic!("expected accept, got {other:?}"),
-    };
-    assert_eq!(resp.status, SetupStatus::Accepted);
-    proxy
-        .handle(SessionEvent::SetupResponseReceived(resp))
-        .unwrap();
-    assert_eq!(proxy.state(), SessionState::Active);
+    // Miss 4, then succeed once...
+    for _ in 0..4 {
+        assert!(responder.handle(SessionEvent::Timeout).unwrap().is_empty());
+    }
+    let actions = responder.handle(capture()).unwrap();
+    assert!(matches!(actions[..], [Action::SendReport(_)]));
+
+    // ...so 4 more misses still leave the session alive.
+    for _ in 0..4 {
+        assert!(responder.handle(SessionEvent::Timeout).unwrap().is_empty());
+        assert_eq!(responder.state(), SessionState::Active);
+    }
+    // The 5th consecutive miss terminates.
+    let actions = responder.handle(SessionEvent::Timeout).unwrap();
+    assert!(matches!(
+        actions[..],
+        [Action::SendTermination(SensingSessionTermination {
+            reason: TerminationReason::Timeout,
+            ..
+        })]
+    ));
+    assert_eq!(responder.state(), SessionState::Terminating);
 }
 
+// ---------- single-role enforcement & out-of-state commands ----------
+
 #[test]
-fn sbp_client_flow_and_rejections() {
-    let mut client = SensingSession::new_initiator(SessionConfig::default());
+fn initiator_role_session_rejects_inbound_setup_and_sbp_requests() {
+    // Review finding 4a: single-role design — a peer must not be able to
+    // hijack an initiator-role session into the responder path.
+    let mut initiator = SensingSession::new_initiator(SessionConfig::default());
+    let actions = initiator
+        .handle(SessionEvent::SetupRequestReceived(setup_request(3)))
+        .unwrap();
+    assert!(matches!(
+        actions[..],
+        [Action::SendSetupResponse(SensingMeasurementSetupResponse {
+            status: SetupStatus::RejectedNotSupported,
+            ..
+        })]
+    ));
+    assert_eq!(initiator.state(), SessionState::Idle);
+
     let sbp = SbpRequest {
         profile: SpecProfile::Ieee80211Bf2025,
-        proxy_setup_id: MeasurementSetupId::new(12).unwrap(),
+        proxy_setup_id: MeasurementSetupId::new(4).unwrap(),
         params: params(),
     };
-    let actions = client.handle(SessionEvent::StartSbp(sbp.clone())).unwrap();
-    assert!(matches!(actions[..], [Action::SendSbpRequest(_)]));
-    let accept = SbpResponse {
-        proxy_setup_id: sbp.proxy_setup_id,
-        status: SbpStatus::Accepted,
-    };
-    client
-        .handle(SessionEvent::SbpResponseReceived(accept))
-        .unwrap();
-    assert_eq!(client.state(), SessionState::Active);
-    // Proxied report is delivered to the local consumer.
-    let report = SensingMeasurementReport {
-        setup_id: sbp.proxy_setup_id,
-        instance_id: MeasurementInstanceId::new(0),
-        payload: payload(1.0),
-    };
-    let actions = client.handle(SessionEvent::ReportReceived(report)).unwrap();
-    assert!(matches!(actions[..], [Action::DeliverReport(_)]));
-
-    // A proxy without SBP capability rejects.
-    let mut cfg = SessionConfig::default();
-    cfg.capabilities.sensing_by_proxy = false;
-    let mut no_sbp = SensingSession::new_responder(cfg);
-    let actions = no_sbp
+    let actions = initiator
         .handle(SessionEvent::SbpRequestReceived(sbp))
         .unwrap();
     assert!(matches!(
@@ -380,7 +376,59 @@ fn sbp_client_flow_and_rejections() {
             ..
         })]
     ));
-    assert_eq!(no_sbp.state(), SessionState::Idle);
+    assert_eq!(initiator.state(), SessionState::Idle);
+    assert!(!initiator.is_sbp_proxy());
+}
+
+#[test]
+fn local_start_commands_error_outside_idle() {
+    // Review finding 4b: StartSetup/StartSbp outside Idle are caller bugs
+    // and must surface as typed errors, not silent no-ops.
+    let sbp = SbpRequest {
+        profile: SpecProfile::Ieee80211Bf2025,
+        proxy_setup_id: MeasurementSetupId::new(13).unwrap(),
+        params: params(),
+    };
+    let start_err = |s: &mut SensingSession, expected: SessionState| {
+        assert!(matches!(
+            s.handle(SessionEvent::StartSetup(setup_request(8))),
+            Err(BfError::InvalidStateForCommand { .. })
+        ));
+        assert!(matches!(
+            s.handle(SessionEvent::StartSbp(sbp.clone())),
+            Err(BfError::InvalidStateForCommand { .. })
+        ));
+        // The rejected commands must not disturb the session.
+        assert_eq!(s.state(), expected);
+    };
+
+    let mut s = SensingSession::new_initiator(SessionConfig::default());
+    s.handle(SessionEvent::StartSetup(setup_request(7)))
+        .unwrap();
+    start_err(&mut s, SessionState::SetupNegotiating);
+
+    s.handle(SessionEvent::SetupResponseReceived(
+        SensingMeasurementSetupResponse {
+            setup_id: MeasurementSetupId::new(7).unwrap(),
+            status: SetupStatus::Accepted,
+        },
+    ))
+    .unwrap();
+    start_err(&mut s, SessionState::Active);
+    // Genuinely ignorable stray frames remain no-ops in Active.
+    assert!(s
+        .handle(SessionEvent::SbpResponseReceived(SbpResponse {
+            proxy_setup_id: MeasurementSetupId::new(7).unwrap(),
+            status: SbpStatus::Accepted,
+        }))
+        .unwrap()
+        .is_empty());
+
+    s.handle(SessionEvent::Terminate(
+        TerminationReason::InitiatorRequested,
+    ))
+    .unwrap();
+    start_err(&mut s, SessionState::Terminating);
 }
 
 // ---------- adversarial: no panics anywhere ----------
