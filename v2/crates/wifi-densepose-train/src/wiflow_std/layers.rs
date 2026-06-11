@@ -6,6 +6,17 @@ use tch::{nn, nn::Module, Tensor};
 
 use super::config::{CONV_BLOCK_DROPOUT, TCN_KERNEL};
 
+/// BatchNorm config matching the reference: gamma = 1 (PyTorch default; the
+/// reference additionally pins BatchNorm1d weight=1/bias=0). tch-0.24's
+/// `BatchNormConfig::default()` would draw gamma from Uniform(0,1), silently
+/// halving activations on average in from-scratch training.
+pub(super) fn bn_cfg() -> nn::BatchNormConfig {
+    nn::BatchNormConfig {
+        ws_init: nn::Init::Const(1.0),
+        ..Default::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GroupedTemporalBlock (TCN level)
 // ---------------------------------------------------------------------------
@@ -53,19 +64,19 @@ impl GroupedTemporalBlock {
         };
 
         let conv1_group = nn::conv1d(&vs / "conv1_group", c_in, c_in, k, grouped_cfg(groups));
-        let bn1_group = nn::batch_norm1d(&vs / "bn1_group", c_in, Default::default());
+        let bn1_group = nn::batch_norm1d(&vs / "bn1_group", c_in, bn_cfg());
         let conv1_pw = nn::conv1d(&vs / "conv1_pw", c_in, c_out, 1, pointwise_cfg);
-        let bn1_pw = nn::batch_norm1d(&vs / "bn1_pw", c_out, Default::default());
+        let bn1_pw = nn::batch_norm1d(&vs / "bn1_pw", c_out, bn_cfg());
 
         let conv2_group = nn::conv1d(&vs / "conv2_group", c_out, c_out, k, grouped_cfg(groups));
-        let bn2_group = nn::batch_norm1d(&vs / "bn2_group", c_out, Default::default());
+        let bn2_group = nn::batch_norm1d(&vs / "bn2_group", c_out, bn_cfg());
         let conv2_pw = nn::conv1d(&vs / "conv2_pw", c_out, c_out, 1, pointwise_cfg);
-        let bn2_pw = nn::batch_norm1d(&vs / "bn2_pw", c_out, Default::default());
+        let bn2_pw = nn::batch_norm1d(&vs / "bn2_pw", c_out, bn_cfg());
 
         let downsample = (c_in != c_out).then(|| {
             (
                 nn::conv1d(&vs / "ds_conv", c_in, c_out, 1, pointwise_cfg),
-                nn::batch_norm1d(&vs / "ds_bn", c_out, Default::default()),
+                nn::batch_norm1d(&vs / "ds_bn", c_out, bn_cfg()),
             )
         });
 
@@ -145,11 +156,11 @@ impl ConvBlock {
             ..Default::default()
         };
         let conv1 = nn::conv(&vs / "conv1", c_in, c_out, [1, 3], asym(stride_w));
-        let bn1 = nn::batch_norm2d(&vs / "bn1", c_out, Default::default());
+        let bn1 = nn::batch_norm2d(&vs / "bn1", c_out, bn_cfg());
         let conv2 = nn::conv(&vs / "conv2", c_out, c_out, [1, 3], asym(1));
-        let bn2 = nn::batch_norm2d(&vs / "bn2", c_out, Default::default());
+        let bn2 = nn::batch_norm2d(&vs / "bn2", c_out, bn_cfg());
         let conv3 = nn::conv(&vs / "conv3", c_out, c_out, [1, 3], asym(1));
-        let bn3 = nn::batch_norm2d(&vs / "bn3", c_out, Default::default());
+        let bn3 = nn::batch_norm2d(&vs / "bn3", c_out, bn_cfg());
 
         let ds_conv = nn::conv(
             &vs / "ds_conv",
@@ -162,7 +173,7 @@ impl ConvBlock {
                 ..Default::default()
             },
         );
-        let ds_bn = nn::batch_norm2d(&vs / "ds_bn", c_out, Default::default());
+        let ds_bn = nn::batch_norm2d(&vs / "ds_bn", c_out, bn_cfg());
 
         ConvBlock {
             conv1,
@@ -228,9 +239,9 @@ impl AxialAttention {
                 ..Default::default()
             },
         );
-        let bn_qkv = nn::batch_norm1d(&vs / "bn_qkv", planes * 3, Default::default());
-        let bn_similarity = nn::batch_norm2d(&vs / "bn_similarity", groups, Default::default());
-        let bn_output = nn::batch_norm1d(&vs / "bn_output", planes, Default::default());
+        let bn_qkv = nn::batch_norm1d(&vs / "bn_qkv", planes * 3, bn_cfg());
+        let bn_similarity = nn::batch_norm2d(&vs / "bn_similarity", groups, bn_cfg());
+        let bn_output = nn::batch_norm1d(&vs / "bn_output", planes, bn_cfg());
 
         AxialAttention {
             qkv,

@@ -2,8 +2,14 @@
 //!
 //! Idiomatic reimplementation of the DY2434 reference (Apache-2.0); see the
 //! [module docs](crate::wiflow_std) for provenance and the evidence grade.
-//! Weights are initialised from scratch (tch defaults; the axial-attention
-//! qkv conv mirrors the reference's `N(0, sqrt(1/in_planes))` init). The
+//! From-scratch init: BN gamma is pinned to 1 (see `layers::bn_cfg`); the
+//! axial-attention qkv conv uses `N(0, sqrt(1/in_planes))` per the
+//! reference's `attention.py` intent (note the reference's *effective* init
+//! differs — its `_initialize_weights` re-inits every `nn.Conv1d`, qkv
+//! included, with `kaiming_normal(fan_out)`); conv weights keep tch defaults
+//! (kaiming-uniform fan_in), which differ in scale from PyTorch's defaults.
+//! These divergences affect from-scratch training dynamics only — BN absorbs
+//! them at init, and loaded checkpoints overwrite everything. The
 //! retrained PyTorch checkpoint loads via [`WiFlowStdModel::load`] after
 //! key-remapped safetensors export
 //! (`benchmarks/wiflow-std/export_to_safetensors.py`); numerical parity with
@@ -99,9 +105,9 @@ impl WiFlowStdModel {
                 ..Default::default()
             },
         );
-        let dec_bn1 = nn::batch_norm2d(&root / "dec_bn1", mid, Default::default());
+        let dec_bn1 = nn::batch_norm2d(&root / "dec_bn1", mid, super::layers::bn_cfg());
         let dec_conv2 = nn::conv2d(&root / "dec_conv2", mid, 2, 1, Default::default());
-        let dec_bn2 = nn::batch_norm2d(&root / "dec_bn2", 2, Default::default());
+        let dec_bn2 = nn::batch_norm2d(&root / "dec_bn2", 2, super::layers::bn_cfg());
 
         Ok(WiFlowStdModel {
             vs,

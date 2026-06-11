@@ -88,6 +88,13 @@ fn serde_rejects_out_of_range_setup_id() {
     assert!(serde_json::from_str::<MeasurementSetupId>("127").is_ok());
 }
 
+#[test]
+fn serde_rejects_out_of_range_threshold_params() {
+    assert!(serde_json::from_str::<ThresholdParams>(r#"{"delta_percent":255}"#).is_err());
+    let ok = serde_json::from_str::<ThresholdParams>(r#"{"delta_percent":100}"#).unwrap();
+    assert_eq!(ok.delta_percent(), 100);
+}
+
 // ---------- validation, no panics ----------
 
 #[test]

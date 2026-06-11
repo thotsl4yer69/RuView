@@ -216,9 +216,28 @@ pub fn bandwidth_mhz(bw: Bandwidth) -> u16 {
 /// Threshold-based reporting parameters: a report is generated only when the
 /// measurement changes by at least `delta_percent` relative to the last
 /// reported measurement (normalized-change trigger).
+///
+/// Deserialization validates through [`ThresholdParams::new`] so the
+/// `delta_percent <= 100` invariant holds on every construction path,
+/// including untrusted wire/persisted payloads (same convention as
+/// [`MeasurementSetupId`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawThresholdParams")]
 pub struct ThresholdParams {
     delta_percent: u8,
+}
+
+#[derive(Deserialize)]
+struct RawThresholdParams {
+    delta_percent: u8,
+}
+
+impl TryFrom<RawThresholdParams> for ThresholdParams {
+    type Error = BfError;
+
+    fn try_from(raw: RawThresholdParams) -> Result<Self, Self::Error> {
+        Self::new(raw.delta_percent)
+    }
 }
 
 impl ThresholdParams {
