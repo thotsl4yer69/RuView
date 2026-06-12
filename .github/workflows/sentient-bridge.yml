@@ -1,0 +1,36 @@
+name: sentient-bridge
+
+# Additive: tests only the sentient_bridge module added by this fork. It does
+# not touch the upstream RuView Rust/Python build or test surface.
+on:
+  push:
+    paths:
+      - 'sentient_bridge/**'
+      - '.github/workflows/sentient-bridge.yml'
+  pull_request:
+    paths:
+      - 'sentient_bridge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Dry-run self-test (no broker, no paho, no hardware)
+        run: python -m sentient_bridge --selftest
+
+      - name: Unit tests
+        # Override the repo-root pytest addopts (upstream forces --cov on src/);
+        # the bridge's tests are self-contained and need no coverage plugin.
+        run: pip install pytest && pytest sentient_bridge/ -q -o addopts=""

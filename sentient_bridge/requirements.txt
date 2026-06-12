@@ -1,0 +1,3 @@
+# sentient_bridge runtime dependency (live publishing only).
+# The simulator, dry-run mode and the self-test need NONE of this.
+paho-mqtt>=1.6
