@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 from .config import BridgeConfig
 from .simulator import CsiSimulator
@@ -32,7 +31,7 @@ class SentientBridge:
             self.publisher.publish(topic, payload, retain=False)
         return len(messages)
 
-    def run(self, max_ticks: Optional[int] = None, sleep: bool = True) -> None:
+    def run(self, max_ticks: int | None = None, sleep: bool = True) -> None:
         self.publisher.connect()
         try:
             n = 0

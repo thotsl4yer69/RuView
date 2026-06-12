@@ -8,8 +8,6 @@ are world-state context only — the fusion core never scores them.
 
 from __future__ import annotations
 
-from typing import Optional
-
 
 def t_presence(node: str) -> str:
     return f"sentient/sensor/csi/{node}/presence"
@@ -42,7 +40,7 @@ def motion(moving: bool, energy: float, **extra) -> dict:
     return payload
 
 
-def vitals(bpm_est: Optional[float] = None, **extra) -> dict:
+def vitals(bpm_est: float | None = None, **extra) -> dict:
     """csi/{node}/vitals — low-trust R&D context (e.g. breathing estimate).
 
     Never scored by the fusion core; carried only so the world-state snapshot

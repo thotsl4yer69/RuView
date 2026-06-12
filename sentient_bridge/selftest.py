@@ -62,7 +62,7 @@ def run_selftest(verbose: bool = True, raise_on_fail: bool = False) -> bool:
         print(f"\n{sum(1 for ok, _ in checks if ok)}/{len(checks)} checks passed")
     if raise_on_fail and not ok_all:
         raise AssertionError("bridge self-test failures: "
-                             + "; ".join(l for ok, l in checks if not ok))
+                             + "; ".join(label for ok, label in checks if not ok))
     return ok_all
 
 

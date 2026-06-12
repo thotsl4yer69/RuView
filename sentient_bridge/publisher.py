@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Tuple
 
 log = logging.getLogger("sentient_bridge.publisher")
 
@@ -15,7 +14,7 @@ class DryRunPublisher:
     prints each message as a JSON line."""
 
     def __init__(self, echo: bool = False):
-        self.messages: List[Tuple[str, dict, bool]] = []
+        self.messages: list[tuple[str, dict, bool]] = []
         self.echo = echo
 
     def publish(self, topic: str, payload: dict, retain: bool = False) -> None:

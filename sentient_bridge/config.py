@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 def _f(name: str, default: float) -> float:
@@ -28,18 +27,18 @@ class BridgeConfig:
     mqtt_host: str = "192.168.1.159"
     mqtt_port: int = 1883
     mqtt_user: str = "sentient"
-    mqtt_pass: Optional[str] = None
+    mqtt_pass: str | None = None
     mqtt_client_id: str = "ruview-bridge"
 
     # CSI nodes this bridge represents (one RuView sensor per node).
-    nodes: List[str] = field(default_factory=lambda: ["lounge", "bedroom"])
+    nodes: list[str] = field(default_factory=lambda: ["lounge", "bedroom"])
 
     publish_interval_sec: float = 2.0
     sim_seed: int = 1312
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls) -> "BridgeConfig":
+    def from_env(cls) -> BridgeConfig:
         nodes_raw = os.environ.get("RUVIEW_BRIDGE_NODES", "lounge,bedroom")
         nodes = [n.strip() for n in nodes_raw.split(",") if n.strip()]
         return cls(

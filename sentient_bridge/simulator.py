@@ -10,7 +10,6 @@ read as UNKNOWN downstream, never EMPTY.
 from __future__ import annotations
 
 import random
-from typing import List, Tuple
 
 from . import schemas
 
@@ -24,8 +23,8 @@ class CsiSimulator:
     def _conf(self, base: float) -> float:
         return round(min(0.99, max(0.0, base + self._rng.uniform(-0.04, 0.04))), 3)
 
-    def tick(self) -> List[Tuple[str, dict]]:
-        out: List[Tuple[str, dict]] = []
+    def tick(self) -> list[tuple[str, dict]]:
+        out: list[tuple[str, dict]] = []
         t = self._tick
 
         for i, node in enumerate(self.nodes):
